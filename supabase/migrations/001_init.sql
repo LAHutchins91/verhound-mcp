@@ -1,6 +1,7 @@
--- Verhound cache, watches, alerts, and per-account caps.
--- Apply this file in the Supabase SQL editor at deploy time.
--- This repository does not apply it.
+-- Verhound schema, file 1 of 4.
+-- Apply supabase/migrations/001 through 004 in numeric order in the Supabase SQL editor.
+-- This repository does not apply these files.
+-- The accounts.plan check below is replaced by 004_free_plan_and_webhooks.sql, which allows free, trial, and pro.
 
 create extension if not exists pgcrypto;
 create extension if not exists citext;

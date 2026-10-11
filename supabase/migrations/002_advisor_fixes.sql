@@ -1,3 +1,6 @@
+-- Verhound schema, file 2 of 4.
+-- Apply after 001_init.sql in the Supabase SQL editor.
+-- This repository does not apply these files.
 -- Fixes from the Supabase security and performance advisors (2026-10-10).
 -- The app uses only the service role, which bypasses RLS. These policies make
 -- the deny-all intent for anon and authenticated explicit.

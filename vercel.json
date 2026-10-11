@@ -18,6 +18,6 @@
     { "source": "/(.*)", "destination": "/api" }
   ],
   "crons": [
-    { "path": "/api/cron/watch", "schedule": "0 11 * * *" }
+    { "path": "/api/cron/watch", "schedule": "0 * * * *" }
   ]
 }

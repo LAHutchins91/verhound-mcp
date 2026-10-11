@@ -8,7 +8,9 @@ const SYSTEMS: Record<Ecosystem, string> = {
   go: "GO",
   maven: "MAVEN",
   cargo: "CARGO",
-  nuget: "NUGET"
+  nuget: "NUGET",
+  rubygems: "RUBYGEMS",
+  composer: ""
 };
 
 export function depsSystem(ecosystem: Ecosystem): string {
@@ -16,7 +18,9 @@ export function depsSystem(ecosystem: Ecosystem): string {
 }
 
 export function packageUrl(ecosystem: Ecosystem, name: string): string {
-  return `https://api.deps.dev/v3/systems/${SYSTEMS[ecosystem]}/packages/${encodePackageName(name)}`;
+  const system = SYSTEMS[ecosystem];
+  if (!system) throw new Error("This ecosystem is not on deps.dev.");
+  return `https://api.deps.dev/v3/systems/${system}/packages/${encodePackageName(name)}`;
 }
 
 export function versionUrl(ecosystem: Ecosystem, name: string, version: string): string {

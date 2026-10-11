@@ -1,6 +1,7 @@
 import type { Ecosystem } from "../config.js";
 import { validPackageName } from "../names.js";
 import { isExactSpec } from "../semver.js";
+import { parseCargoLock, parseComposerLock, parseCsproj, parseGemfileLock, parsePackagesLock, parsePnpmLock, parsePom, parseYarnLock } from "./locks.js";
 
 export interface ParsedDep {
   ecosystem: Ecosystem;
@@ -304,9 +305,14 @@ export function parseGoMod(content: string): ParseResult {
 
 export function parseManifest(filename: string, content: string, includeDev = false): ParseResult {
   const base = filename.split(/[/\\]/).pop()?.toLowerCase() ?? "";
-  if (base === "pnpm-lock.yaml" || base === "yarn.lock") {
-    return empty(base, [`${base} is not parsed in this version. Paste a package-lock.json, package.json, requirements.txt, pyproject.toml, poetry.lock, or go.mod.`]);
-  }
+  if (base === "pnpm-lock.yaml") return parsePnpmLock(content, includeDev);
+  if (base === "yarn.lock") return parseYarnLock(content);
+  if (base === "cargo.lock") return parseCargoLock(content);
+  if (base === "pom.xml") return parsePom(content);
+  if (base.endsWith(".csproj")) return parseCsproj(content, includeDev);
+  if (base === "packages.lock.json") return parsePackagesLock(content);
+  if (base === "gemfile.lock") return parseGemfileLock(content);
+  if (base === "composer.lock") return parseComposerLock(content, includeDev);
   if (base === "package-lock.json") return parseNpmLock(content, includeDev);
   if (base === "package.json") return parsePackageJson(content, includeDev);
   if (base === "requirements.txt" || base.endsWith("-requirements.txt")) return parseRequirements(content);

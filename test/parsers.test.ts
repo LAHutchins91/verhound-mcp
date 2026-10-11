@@ -38,13 +38,30 @@ describe("manifest parsers", () => {
     expect(lock.dependencies[0]?.version).toBe("2.31.0");
     const go = parseManifest("go.mod", "module example.com/app\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n\nreplace github.com/gin-gonic/gin => ./local\n");
     expect(go.unresolved[0]?.reason).toContain("local path");
-    expect(parseManifest("pnpm-lock.yaml", "lockfileVersion: 9").notes.join(" ")).toContain("not parsed");
-    expect(parseManifest("yarn.lock", "").notes.join(" ")).toContain("not parsed");
+    const pnpm = parseManifest("pnpm-lock.yaml", "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    devDependencies:\n      vitest:\n        version: 2.0.0\n\npackages:\n  express@4.18.2:\n    resolution: {integrity: sha512-abc}\n  vitest@2.0.0:\n    resolution: {integrity: sha512-def}\n");
+    expect(pnpm.dependencies.map((dep) => dep.name)).toEqual(["express"]);
+    const yarn = parseManifest("yarn.lock", "express@^4.17.1:\n  version \"4.17.1\"\n  resolved \"https://registry.yarnpkg.com/express/-/express-4.17.1.tgz\"\n");
+    expect(yarn.dependencies[0]).toMatchObject({ name: "express", version: "4.17.1", ecosystem: "npm" });
+  });
+
+  it("reads cargo, maven, nuget, ruby, and composer lockfiles", () => {
+    const cargo = parseManifest("Cargo.lock", "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.210\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n");
+    expect(cargo.dependencies[0]).toMatchObject({ ecosystem: "cargo", name: "serde", version: "1.0.210" });
+    const pom = parseManifest("pom.xml", "<project><dependencies><dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.16</version></dependency></dependencies><build><plugins><plugin><dependencies><dependency><groupId>com.example</groupId><artifactId>plugin-dep</artifactId><version>1.0.0</version></dependency></dependencies></plugin></plugins></build></project>");
+    expect(pom.dependencies.map((dep) => dep.name)).toEqual(["org.slf4j:slf4j-api"]);
+    const csproj = parseManifest("App.csproj", "<Project><ItemGroup><PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" /></ItemGroup></Project>");
+    expect(csproj.dependencies[0]).toMatchObject({ ecosystem: "nuget", name: "Newtonsoft.Json", version: "13.0.3" });
+    const nugetLock = parseManifest("packages.lock.json", JSON.stringify({ dependencies: { "net8.0": { "Newtonsoft.Json": { type: "Direct", resolved: "13.0.3" } } } }));
+    expect(nugetLock.dependencies[0]?.version).toBe("13.0.3");
+    const gems = parseManifest("Gemfile.lock", "GEM\n  remote: https://rubygems.org/\n  specs:\n    rack (3.1.8)\n\nPLATFORMS\n  ruby\n");
+    expect(gems.dependencies[0]).toMatchObject({ ecosystem: "rubygems", name: "rack", version: "3.1.8" });
+    const composer = parseManifest("composer.lock", JSON.stringify({ packages: [{ name: "monolog/monolog", version: "v3.7.0", version_normalized: "3.7.0.0" }] }));
+    expect(composer.dependencies[0]).toMatchObject({ ecosystem: "composer", name: "monolog/monolog", version: "3.7.0" });
   });
 
   it("does not throw on hostile input", () => {
     fc.assert(fc.property(fc.string({ maxLength: 4000 }), (content) => {
-      for (const name of ["package.json", "package-lock.json", "requirements.txt", "pyproject.toml", "poetry.lock", "go.mod", "pnpm-lock.yaml"]) {
+      for (const name of ["package.json", "package-lock.json", "requirements.txt", "pyproject.toml", "poetry.lock", "go.mod", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "pom.xml", "App.csproj", "packages.lock.json", "Gemfile.lock", "composer.lock"]) {
         const parsed = parseManifest(name, content);
         expect(parsed.dependencies.length).toBeLessThan(5000);
       }

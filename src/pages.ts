@@ -8,10 +8,16 @@ import { DATA_SOURCES_TEXT } from "./sources.js";
 import { getStore } from "./store.js";
 import { signToken, verifyToken, type TokenPayload } from "./tokens.js";
 
+/** Empty until billing is connected. The sentence is not shown while checkout cannot collect a card. */
+export function trialCardPhrase(): string {
+  return isBillingConfigured() ? "A card is required." : "";
+}
+
 function priceCopy(): string {
+  const card = trialCardPhrase();
   return `<!-- price-allowed:start -->
 <p>Pro is $7.99/month or $79.99/year.</p>
-<p>The trial is ${TRIAL_DAYS} days. A card is required. It includes ${LIMITS.trial.callsPerDay} tool calls a day and ${LIMITS.trial.watches} watched project. Pro includes ${LIMITS.pro.callsPerDay} tool calls a day and up to ${LIMITS.pro.watches} watched projects, plus daily advisory alerts.</p>
+<p>The trial is ${TRIAL_DAYS} days.${card ? ` ${card}` : ""} It includes ${LIMITS.trial.callsPerDay} tool calls a day and ${LIMITS.trial.watches} watched project. Pro includes ${LIMITS.pro.callsPerDay} tool calls a day and up to ${LIMITS.pro.watches} watched projects, plus advisory alerts.</p>
 <!-- price-allowed:end -->
 ${freeCopy()}`;
 }
@@ -47,7 +53,7 @@ export function installPages(app: Express): void {
       <section class="section grid">
         <article class="card"><h3>Known advisories</h3><p>Advisory IDs come from OSV.dev, with the first fixed version when OSV publishes one. An empty list means none were found at the time shown.</p></article>
         <article class="card"><h3>Existence</h3><p>A name that exists in the registry is only that: the name is published. It is not a statement about maintenance or intent.</p></article>
-        <article class="card"><h3>Watched projects</h3><p>A watched project stores the parsed dependency list and filename. Verhound re-checks it daily and can email new advisories.</p></article>
+        <article class="card"><h3>Watched projects</h3><p>A watched project stores the parsed dependency list and filename. Verhound keeps checking every watched project and can email new advisories, or post them to a Slack or Discord incoming webhook.</p></article>
         <article class="card"><h3>Plans</h3><p>A small free plan for one-off checks, a ${TRIAL_DAYS}-day Pro trial, then Pro. Every account needs a verified email.</p></article>
       </section>
       <section class="section"><h2>Data sources</h2><p>${escapeHtml(DATA_SOURCES_TEXT)}</p></section>`;
@@ -61,7 +67,7 @@ export function installPages(app: Express): void {
       ${priceCopy()}
       <section class="card">
         <p>${ready ? "Billing is configured." : "Card checkout is not open on this server yet. No card is collected until billing is connected."}</p>
-        <p>When checkout is open, a card starts the ${TRIAL_DAYS}-day trial. After the trial, Pro continues at the price above. You can cancel and keep access through the end of the paid period.</p>
+        <p>${ready ? `A card is required to start the ${TRIAL_DAYS}-day trial.` : "The trial starts when billing is connected."} After the trial, Pro continues at the price above. You can cancel and keep access through the end of the paid period.</p>
         <p>Support: <a href="mailto:${escapeHtml(PUBLIC_CONTACT_EMAIL)}">${escapeHtml(PUBLIC_CONTACT_EMAIL)}</a></p>
       </section>`;
     res.type("html").send(shell(req, `Checkout · ${PUBLIC_BRAND}`, body));

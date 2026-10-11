@@ -91,9 +91,10 @@ describe("http surface", () => {
     for (const html of [landing, checkout]) {
       expect(html).toContain("$7.99/month");
       expect(html).toContain("$79.99/year");
-      expect(html.toLowerCase()).toContain("card is required");
+      expect(html.toLowerCase()).not.toContain("card is required");
       expect(html.toLowerCase()).not.toContain("free forever");
     }
+    expect(checkout.toLowerCase()).toContain("no card is collected until billing is connected");
     expect(privacy).not.toContain("$");
     expect(privacy.toLowerCase()).not.toContain("stripe");
   });

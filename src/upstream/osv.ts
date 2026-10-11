@@ -7,7 +7,9 @@ const OSV_ECOSYSTEM: Record<Ecosystem, string> = {
   go: "Go",
   maven: "Maven",
   cargo: "crates.io",
-  nuget: "NuGet"
+  nuget: "NuGet",
+  rubygems: "RubyGems",
+  composer: "Packagist"
 };
 
 export interface OsvQuery {

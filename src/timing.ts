@@ -40,11 +40,13 @@ export function logToolTiming(tool: string, durationMs: number, ok: boolean, sta
   }));
 }
 
-export function logCronTiming(checked: number, alerts: number, durationMs: number): void {
+export function logCronTiming(checked: number, alerts: number, durationMs: number, remaining: number, failed: number): void {
   console.log(JSON.stringify({
     event: "cron_timing",
     checked,
     alerts,
+    remaining,
+    failed,
     duration_ms: Math.max(0, Math.round(durationMs))
   }));
 }

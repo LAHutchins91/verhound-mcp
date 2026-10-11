@@ -1,18 +1,22 @@
 import crypto from "node:crypto";
 import type { Access } from "./billing.js";
 import { nowDate, nowMs } from "./clock.js";
-import { limitsFor, overPlanLimitMessage, proOnlyMessage, proUpsell, verifyEmailMessage, type Ecosystem } from "./config.js";
+import { WATCH_STALE_MS, limitsFor, overPlanLimitMessage, proOnlyMessage, proUpsell, verifyEmailMessage, type Ecosystem } from "./config.js";
 import { envelope, toolError, toolResult } from "./envelope.js";
+import { assessLicenses, type LicensePolicy } from "./license.js";
 import { parseManifest, type ParsedDep } from "./manifest/parse.js";
 import { lookupPackages, type PackageFact } from "./lookup.js";
 import { similarPopular } from "./names.js";
+import { verifiedReleaseNotes } from "./release-notes.js";
 import { runtimeEol } from "./runtime.js";
-import { cmpVersion, jump, satisfies } from "./semver.js";
+import { cmpVersion, isPrerelease, jump, satisfies } from "./semver.js";
 import { SOURCE, mergeSources, type SourceCitation } from "./sources.js";
 import { getStore, type AlertRecord, type DepRecord, type WatchRecord } from "./store.js";
 import { contentHash } from "./text.js";
 import { weeklyDownloads } from "./upstream/npm.js";
 import { beginCall } from "./usage.js";
+import { packageVerdict, publishedUnder72Hours, publishedWithin } from "./verdict.js";
+import { webhookHostLabel, webhookKind } from "./webhooks.js";
 
 const LOW_DOWNLOADS = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,7 +28,31 @@ export interface ToolPayload {
   isError?: true;
 }
 
+function malwareFirst<T extends { id: string; malicious?: boolean }>(advisories: T[]): T[] {
+  return [...advisories].sort((a, b) => Number(Boolean(b.malicious || b.id.startsWith("MAL-"))) - Number(Boolean(a.malicious || a.id.startsWith("MAL-"))));
+}
+
+function decide(fact: PackageFact, policy?: LicensePolicy) {
+  const license = assessLicenses(fact.declared_licenses, policy, fact.exists === true);
+  const similar = similarPopular(fact.ecosystem, fact.name, 1).length > 0;
+  const publishedAt = fact.requested_published_at || fact.latest_published_at;
+  const recent = publishedUnder72Hours(publishedAt);
+  const decision = packageVerdict({
+    exists: fact.exists,
+    advisoriesKnown: fact.advisories_known,
+    advisories: fact.advisories,
+    deprecated: fact.deprecated,
+    publishedUnder30Days: Boolean(fact.first_published_at && publishedWithin(fact.first_published_at, 30 * DAY_MS)),
+    publishedUnder72Hours: recent,
+    similar,
+    licenseFlags: license.flags,
+    licenseReasons: license.reasons
+  });
+  return { ...decision, license, recent };
+}
+
 function publicFact(fact: PackageFact) {
+  const decision = decide(fact);
   return {
     ecosystem: fact.ecosystem,
     name: fact.name,
@@ -38,9 +66,12 @@ function publicFact(fact: PackageFact) {
     deprecated_reason: fact.deprecated_reason,
     declared_licenses: fact.declared_licenses,
     license_note: fact.declared_licenses.length ? "declared license (from package metadata)" : undefined,
-    advisories: fact.advisories,
+    advisories: malwareFirst(fact.advisories),
     advisories_known: fact.advisories_known,
     versions_behind: fact.versions_behind,
+    published_under_72_hours: decision.recent,
+    verdict: decision.verdict,
+    reasons: decision.reasons,
     notes: fact.notes
   };
 }
@@ -81,6 +112,7 @@ function flagsFor(fact: PackageFact, weekly: number | null, similar: { name: str
   if (similar.length) flags.push("similar_to_popular");
   if (fact.deprecated) flags.push("deprecated");
   if (fact.exists && !fact.repo_url) flags.push("no_repository_link");
+  if (publishedUnder72Hours(fact.requested_published_at) || publishedUnder72Hours(fact.latest_published_at)) flags.push("published_under_72_hours");
   return flags;
 }
 
@@ -121,17 +153,24 @@ export async function verifyPackageExists(access: Access, input: { ecosystem: Ec
   return finish({ packages: rows }, mergeSources(facts.map((fact) => fact.sources)), notes, Math.max(0, ...facts.map((fact) => fact.cacheAgeSeconds)), facts.some((fact) => fact.stale));
 }
 
-function findingFrom(fact: PackageFact, version: string | undefined) {
+function findingFrom(fact: PackageFact, version: string | undefined, policy?: LicensePolicy) {
+  const decision = decide(fact, policy);
   return {
     name: fact.name,
     version: version ?? fact.requested_version ?? fact.latest_stable ?? "",
-    advisories: fact.advisories,
+    advisories: malwareFirst(fact.advisories),
     deprecated: fact.deprecated,
-    latest_stable: fact.latest_stable ?? null
+    latest_stable: fact.latest_stable ?? null,
+    declared_licenses: fact.declared_licenses,
+    license_note: fact.declared_licenses.length ? "declared license (from package metadata)" : undefined,
+    license_flags: decision.license.flags,
+    published_under_72_hours: decision.recent,
+    verdict: decision.verdict,
+    reasons: decision.reasons
   };
 }
 
-export async function auditManifest(access: Access, input: { filename: string; content: string; includeDev?: boolean }): Promise<ToolPayload> {
+export async function auditManifest(access: Access, input: { filename: string; content: string; includeDev?: boolean; licenseAllow?: string[]; licenseDeny?: string[] }): Promise<ToolPayload> {
   const limits = limitsFor(access.plan);
   const bytes = Buffer.byteLength(input.content);
   const parsed = parseManifest(input.filename, input.content, Boolean(input.includeDev));
@@ -148,10 +187,11 @@ export async function auditManifest(access: Access, input: { filename: string; c
 
   const pinned = parsed.dependencies.filter((dep) => dep.version && !dep.range);
   const ranges = parsed.dependencies.filter((dep) => !dep.version || dep.range);
+  const policy: LicensePolicy = { allow: input.licenseAllow, deny: input.licenseDeny };
   const pinnedFacts = pinned.length
     ? await lookupPackages(pinned.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name, version: dep.version })))
     : [];
-  const findings = pinned.map((dep, index) => findingFrom(pinnedFacts[index], dep.version));
+  const findings = pinned.map((dep, index) => findingFrom(pinnedFacts[index], dep.version, policy));
   const extraFacts: PackageFact[] = [];
   // Batch range lookups so a ranged package.json does not run one lookup at a time.
   const rangeMeta = ranges.length
@@ -176,14 +216,19 @@ export async function auditManifest(access: Access, input: { filename: string; c
   for (const item of pairPlan) {
     const pair = [pairFacts[item.at], pairFacts[item.at + 1]];
     const advisories = [...pair[0].advisories, ...pair[1].advisories.filter((entry) => !pair[0].advisories.some((other) => other.id === entry.id))];
-    findings.push({
-      name: item.dep.name,
-      version: item.low === item.high ? item.low : `${item.low}..${item.high}`,
+    const combined: PackageFact = {
+      ...pair[0],
       advisories,
       deprecated: pair[0].deprecated || pair[1].deprecated,
+      latest_stable: item.meta.latest_stable,
+      declared_licenses: pair[0].declared_licenses.length ? pair[0].declared_licenses : pair[1].declared_licenses
+    };
+    findings.push({
+      ...findingFrom(combined, item.low === item.high ? item.low : `${item.low}..${item.high}`, policy),
       latest_stable: item.meta.latest_stable ?? null
     });
   }
+  findings.sort((a, b) => Number(b.advisories.some((item) => item.malicious || item.id.startsWith("MAL-"))) - Number(a.advisories.some((item) => item.malicious || item.id.startsWith("MAL-"))));
   const runtime = [];
   for (const item of parsed.runtimes.slice(0, 5)) {
     const eol = await runtimeEol(item.product, item.declared);
@@ -213,8 +258,14 @@ export async function auditManifest(access: Access, input: { filename: string; c
     runtime,
     summary: {
       packages_with_advisories: findings.filter((finding) => finding.advisories.length).length,
+      known_malware: findings.filter((finding) => finding.advisories.some((item) => item.malicious || item.id.startsWith("MAL-"))).length,
       total_advisories: advisories.length,
-      by_severity: bySeverity
+      by_severity: bySeverity,
+      verdicts: {
+        no_known_issues: findings.filter((finding) => finding.verdict === "no_known_issues").length,
+        review: findings.filter((finding) => finding.verdict === "review").length,
+        avoid: findings.filter((finding) => finding.verdict === "avoid").length
+      }
     }
   }, mergeSources(allFacts.map((fact) => fact.sources)), notes, Math.max(0, ...allFacts.map((fact) => fact.cacheAgeSeconds), 0), allFacts.some((fact) => fact.stale));
 }
@@ -222,8 +273,30 @@ export async function auditManifest(access: Access, input: { filename: string; c
 function commandsFor(ecosystem: Ecosystem, name: string, version: string): string[] {
   if (ecosystem === "npm") return [`npm install ${name}@${version}`];
   if (ecosystem === "pypi") return [`python -m pip install '${name}==${version}'`];
-  if (ecosystem === "go") return [`go get ${name}@v${version}`];
+  if (ecosystem === "go") {
+    const goVersion = version.startsWith("v") ? version : `v${version}`;
+    return [`go get ${name}@${goVersion}`];
+  }
+  if (ecosystem === "cargo") return [`cargo add ${name}@${version}`];
+  if (ecosystem === "nuget") return [`dotnet add package ${name} --version ${version}`];
+  if (ecosystem === "maven") {
+    const [group, artifact] = name.split(":");
+    const groupId = group || name;
+    const artifactId = artifact || name;
+    return [
+      `mvn versions:use-dep-version -Dincludes=${groupId}:${artifactId} -DdepVersion=${version} -DforceVersion=true`,
+      `<dependency><groupId>${groupId}</groupId><artifactId>${artifactId}</artifactId><version>${version}</version></dependency>`
+    ];
+  }
+  if (ecosystem === "rubygems") return [`bundle add ${name} --version ${version}`];
+  if (ecosystem === "composer") return [`composer require ${name}:${version}`];
   return [`Review ${name} ${version} and apply it with the ${ecosystem} toolchain.`];
+}
+
+function cleanTarget(facts: PackageFact[]): PackageFact | undefined {
+  const clean = facts.filter((fact) => fact.advisories_known && fact.requested_version_found !== false && fact.advisories.length === 0 && fact.requested_version);
+  clean.sort((a, b) => cmpVersion(b.requested_version || "", a.requested_version || ""));
+  return clean[0];
 }
 
 export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem; name: string; fromVersion: string; toVersion?: string; projectRuntime?: { node?: string; python?: string } }): Promise<ToolPayload> {
@@ -232,15 +305,39 @@ export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem;
   const blocked = await gate(access, "plan_upgrade", { packages: 1 });
   if (blocked) return toolError(blocked);
   const [fromFact] = await lookupPackages([{ ecosystem: input.ecosystem, name: input.name, version: input.fromVersion }]);
-  const target = input.toVersion || fromFact.latest_stable;
-  if (!target) return toolError("No target version was found. Nothing was planned.");
-  const [toFact] = await lookupPackages([{ ecosystem: input.ecosystem, name: input.name, version: target }]);
+  let target = input.toVersion;
+  let targetReason = "the version you asked for";
+  let toFact: PackageFact | undefined;
+  if (target) {
+    [toFact] = await lookupPackages([{ ecosystem: input.ecosystem, name: input.name, version: target }]);
+  } else {
+    const stable = fromFact.version_list.filter((row) => !isPrerelease(row.version));
+    const newer = stable.filter((row) => cmpVersion(input.fromVersion, row.version) < 0).map((row) => row.version);
+    const fixes = fromFact.advisories.map((item) => item.first_fixed_version).filter((item): item is string => Boolean(item));
+    const pool = [...new Set([fromFact.latest_stable, ...fixes, ...newer].filter((item): item is string => Boolean(item)))]
+      .filter((version) => cmpVersion(input.fromVersion, version) <= 0)
+      .sort((a, b) => cmpVersion(b, a))
+      .slice(0, 12);
+    if (!pool.length) return toolError("No target version was found. Nothing was planned.");
+    const checked = await lookupPackages(pool.map((version) => ({ ecosystem: input.ecosystem, name: input.name, version })));
+    const chosen = cleanTarget(checked);
+    if (chosen?.requested_version) {
+      target = chosen.requested_version;
+      toFact = chosen;
+      targetReason = "Newest version with no known advisories in OSV.dev.";
+    } else {
+      target = fromFact.latest_stable || pool[0];
+      toFact = checked.find((fact) => fact.requested_version === target) ?? checked[0];
+      targetReason = "Every newer version that was checked still has known advisories, or the advisory lookup did not complete. This is the latest version.";
+    }
+  }
+  if (!target || !toFact) return toolError("No target version was found. Nothing was planned.");
   const toIds = new Set(toFact.advisories.map((item) => item.id));
   const deprecatedBetween = fromFact.version_list
     .filter((row) => row.deprecated && cmpVersion(input.fromVersion, row.version) < 0 && cmpVersion(row.version, target) < 0)
     .map((row) => row.version);
   const repo = toFact.repo_url || fromFact.repo_url;
-  const releaseNotes = repo ? [`${repo}/releases/tag/v${target}`, `${repo}/blob/HEAD/CHANGELOG.md`] : [];
+  const releaseNotes = await verifiedReleaseNotes(repo, target);
   const peerChanges = Object.keys({ ...fromFact.peers, ...toFact.peers }).sort().flatMap((name) => {
     const before = fromFact.peers[name] ?? "";
     const after = toFact.peers[name] ?? "";
@@ -248,6 +345,7 @@ export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem;
   });
   const notes = [
     "This is a plan only. Verhound has not changed your project.",
+    ...releaseNotes.notes,
     ...fromFact.notes,
     ...toFact.notes
   ];
@@ -256,6 +354,8 @@ export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem;
     name: toFact.name,
     from_version: input.fromVersion,
     to_version: target,
+    latest_stable: fromFact.latest_stable ?? null,
+    target_reason: targetReason,
     jump: jump(input.fromVersion, target),
     advisories_fixed: fromFact.advisories.filter((item) => !toIds.has(item.id)),
     advisories_remaining: toFact.advisories,
@@ -266,7 +366,7 @@ export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem;
     },
     peer_dependency_changes: peerChanges,
     deprecated_in_between: deprecatedBetween,
-    release_notes_links: releaseNotes,
+    release_notes_links: releaseNotes.links,
     suggested_steps: [
       "Read the advisories and the release notes links.",
       "Decide whether the version jump fits this project.",
@@ -313,7 +413,7 @@ async function baseline(deps: DepRecord[]): Promise<{ packagesWithAdvisories: nu
   };
 }
 
-export async function watchManifest(access: Access, input: { label: string; filename: string; content: string; minSeverity?: string; alertEmail?: "account" }): Promise<ToolPayload> {
+export async function watchManifest(access: Access, input: { label: string; filename: string; content: string; minSeverity?: string; alertEmail?: "account"; webhookUrl?: string; licenseAllow?: string[]; licenseDeny?: string[] }): Promise<ToolPayload> {
   const denied = proOnly(access);
   if (denied) return denied;
   const limits = limitsFor(access.plan);
@@ -327,6 +427,10 @@ export async function watchManifest(access: Access, input: { label: string; file
   if (!existing && count >= limits.watches) {
     return toolError(access.plan === "pro" ? "This plan has no room for another watched project." : proUpsell());
   }
+  const webhook = input.webhookUrl?.trim() ?? "";
+  if (webhook && !webhookKind(webhook)) {
+    return toolError("Webhook host is not allowed. Use an https incoming webhook on hooks.slack.com/services/ or discord.com/api/webhooks/.");
+  }
   const parsed = parseManifest(input.filename, input.content, false);
   const deps = pinnedDeps(parsed.dependencies);
   if (deps.length > limits.manifestDeps) return toolError(overPlanLimitMessage());
@@ -338,6 +442,7 @@ export async function watchManifest(access: Access, input: { label: string; file
   const summary: Record<string, number> = {};
   for (const dep of deps) summary[dep.ecosystem] = (summary[dep.ecosystem] ?? 0) + 1;
   const email = input.alertEmail === "account" ? access.email : null;
+  const policy: LicensePolicy = { allow: input.licenseAllow, deny: input.licenseDeny };
   const watch = await store.saveWatch({
     account_id: access.accountId,
     label: input.label,
@@ -347,7 +452,10 @@ export async function watchManifest(access: Access, input: { label: string; file
     min_severity: input.minSeverity ?? "low",
     last_checked_at: nowDate().toISOString(),
     baseline_complete: true,
-    email
+    email,
+    webhook_url: webhook || null,
+    license_allow: input.licenseAllow ?? [],
+    license_deny: input.licenseDeny ?? []
   });
   const seenAt = nowDate().toISOString();
   if (deps.length) {
@@ -358,14 +466,22 @@ export async function watchManifest(access: Access, input: { label: string; file
       }
     }
   }
-  const next = new Date(nowMs() + DAY_MS);
-  next.setUTCHours(11, 0, 0, 0);
-  if (next.getTime() <= nowMs()) next.setUTCDate(next.getUTCDate() + 1);
+  const next = new Date(nowMs() + WATCH_STALE_MS);
+  const licenseNotes: string[] = [];
+  if (deps.length && (policy.allow?.length || policy.deny?.length)) {
+    const facts = await lookupPackages(deps.map((dep) => ({ ecosystem: dep.ecosystem as Ecosystem, name: dep.name, version: dep.version })));
+    for (const fact of facts) {
+      const assessed = assessLicenses(fact.declared_licenses, policy, fact.exists === true);
+      for (const reason of assessed.reasons) licenseNotes.push(`${fact.name}: ${reason}`);
+    }
+  }
   const notes = [
     ...parsed.notes,
     ...parsed.unresolved.map((item) => `${item.name} was not stored: ${item.reason}`),
     ...base.notes,
-    email ? "Alerts for this watch can be emailed to the account address." : "No account email is saved, so alerts stay available from list_alerts."
+    ...licenseNotes,
+    email ? "Alerts for this watch can be emailed to the account address." : "No account email is saved, so alerts stay available from list_alerts.",
+    webhook ? `Alerts for this watch can be posted to ${webhookHostLabel(webhook)}.` : "No Slack or Discord webhook is saved for this watch."
   ];
   return finish({
     watch_id: watch.id,
@@ -399,6 +515,7 @@ export async function listAlerts(access: Access, input: { label?: string; since?
       version: alert.version,
       advisory_id: alert.advisory_id,
       severity: alert.severity,
+      malicious: alert.malicious,
       first_fixed_version: alert.first_fixed_version,
       url: alert.url,
       detected_at: alert.detected_at,
@@ -412,13 +529,14 @@ export async function unwatchManifest(access: Access, label: string): Promise<To
   return finish({ deleted }, [], [], 0, false);
 }
 
-export async function recordNewAlert(watch: WatchRecord, alert: Omit<AlertRecord, "id" | "detected_at" | "emailed_at">): Promise<AlertRecord> {
+export async function recordNewAlert(watch: WatchRecord, alert: Omit<AlertRecord, "id" | "detected_at" | "emailed_at" | "malicious" | "label"> & { malicious?: boolean }): Promise<AlertRecord> {
   const row: AlertRecord = {
     ...alert,
     id: crypto.randomUUID(),
     detected_at: nowDate().toISOString(),
     emailed_at: null,
-    label: watch.label
+    label: watch.label,
+    malicious: Boolean(alert.malicious || alert.advisory_id.startsWith("MAL-"))
   };
   await getStore().addAlert(row);
   return row;

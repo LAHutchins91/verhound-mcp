@@ -6,6 +6,8 @@ const PYPI_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const GO_NAME = /^[a-z0-9][a-z0-9.-]*(?:\/[A-Za-z0-9._~+-]+)+$/;
 const MAVEN_NAME = /^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$/;
 const SIMPLE_NAME = /^[A-Za-z0-9_.-]+$/;
+const GEM_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const COMPOSER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 export function pep503(name: string): string {
   return name.trim().toLowerCase().replace(/[-_.]+/g, "-");
@@ -13,7 +15,8 @@ export function pep503(name: string): string {
 
 export function normalizeName(ecosystem: Ecosystem, name: string): string {
   if (ecosystem === "pypi") return pep503(name);
-  if (ecosystem === "npm" || ecosystem === "nuget" || ecosystem === "cargo") return name.trim();
+  if (ecosystem === "npm" || ecosystem === "nuget" || ecosystem === "cargo" || ecosystem === "rubygems") return name.trim();
+  if (ecosystem === "composer") return name.trim().toLowerCase();
   return name.trim();
 }
 
@@ -26,6 +29,8 @@ export function validPackageName(ecosystem: Ecosystem, name: string): boolean {
   if (ecosystem === "go") return GO_NAME.test(value) && !value.split("/").includes("..");
   if (ecosystem === "maven") return MAVEN_NAME.test(value);
   if (ecosystem === "cargo") return /^[A-Za-z0-9_-]+$/.test(value);
+  if (ecosystem === "rubygems") return GEM_NAME.test(value);
+  if (ecosystem === "composer") return COMPOSER_NAME.test(value);
   return SIMPLE_NAME.test(value);
 }
 

@@ -1,4 +1,7 @@
--- One Pro trial per normalized email, and shared one-time use for OAuth codes and refresh tokens.
+-- Verhound schema, file 3 of 4.
+-- Apply after 002_advisor_fixes.sql in the Supabase SQL editor.
+-- This repository does not apply these files.
+-- One Pro trial per normalized email, and one-time use for OAuth codes and refresh tokens.
 
 -- trial_markers has no foreign key to accounts on purpose: deleting an account keeps the marker.
 -- email_hash is a SHA-256 of the normalized email, so the address itself is not kept here.

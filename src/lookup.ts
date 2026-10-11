@@ -6,10 +6,13 @@ import { SOURCE, type SourceCitation } from "./sources.js";
 import { cmpVersion, isPrerelease, versionsBehind } from "./semver.js";
 import { uniqueNotes } from "./text.js";
 import { getPackage, getVersion } from "./upstream/depsdev.js";
+import { githubMalware } from "./upstream/github.js";
 import { UpstreamError, type CachedJson } from "./upstream/http.js";
 import { packument } from "./upstream/npm.js";
 import { getVuln, queryBatch } from "./upstream/osv.js";
+import { getComposerPackage } from "./upstream/packagist.js";
 import { project } from "./upstream/pypi.js";
+import { getGemVersions } from "./upstream/rubygems.js";
 
 export interface LookupRequest {
   ecosystem: Ecosystem;
@@ -95,7 +98,7 @@ function githubHttps(raw: string): string | undefined {
   }
 }
 
-async function settle(source: "depsdev" | "npm" | "pypi", run: () => Promise<CachedJson>): Promise<{ value?: CachedJson; error?: string }> {
+async function settle(source: "depsdev" | "npm" | "pypi" | "rubygems" | "packagist", run: () => Promise<CachedJson>): Promise<{ value?: CachedJson; error?: string }> {
   try {
     return { value: await run() };
   } catch (error) {
@@ -145,50 +148,62 @@ export async function lookupPackages(requests: LookupRequest[]): Promise<Package
     }
   }));
 
-  return drafts.map((draft, index) => {
+  return Promise.all(drafts.map(async (draft, index) => {
     const fact = draft.fact;
     if (batch.notes.length) fact.notes.push(...batch.notes);
     fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, batch.age);
     fact.stale = fact.stale || batch.stale;
-    if (!fact.exists || !draft.queryVersion) {
-      fact.notes = uniqueNotes(fact.notes);
-      return fact;
-    }
-    if (batch.notes.some((note) => note.includes("OSV.dev did not respond"))) {
-      fact.advisories_known = false;
-    } else {
-      fact.advisories_known = true;
-      fact.sources.push(SOURCE.osv);
-      const version = draft.queryVersion;
-      for (const id of idLists[index] ?? []) {
-        const loaded = vulns.get(id);
-        if (loaded) {
-          fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, loaded.age);
-          fact.stale = fact.stale || loaded.stale;
+    if (fact.exists && draft.queryVersion) {
+      if (batch.notes.some((note) => note.includes("OSV.dev did not respond"))) {
+        fact.advisories_known = false;
+      } else {
+        fact.advisories_known = true;
+        fact.sources.push(SOURCE.osv);
+        const version = draft.queryVersion;
+        for (const id of idLists[index] ?? []) {
+          const loaded = vulns.get(id);
+          if (loaded) {
+            fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, loaded.age);
+            fact.stale = fact.stale || loaded.stale;
+          }
+          const advisory = loaded?.raw ? advisoryFromOsv(loaded.raw, version) : null;
+          if (advisory) fact.advisories.push(advisory);
+          else {
+            fact.advisories.push({
+              id,
+              aliases: [],
+              summary: "",
+              source_database: id.startsWith("GHSA-") ? "GitHub Advisory Database" : "OSV.dev",
+              url: `https://osv.dev/vulnerability/${id}`,
+              affected_range_text: ""
+            });
+            if (loaded?.note) fact.notes.push(loaded.note);
+          }
         }
-        const advisory = loaded?.raw ? advisoryFromOsv(loaded.raw, version) : null;
-        if (advisory) fact.advisories.push(advisory);
-        else {
-          fact.advisories.push({
-            id,
-            aliases: [],
-            summary: "",
-            source_database: id.startsWith("GHSA-") ? "GitHub Advisory Database" : "OSV.dev",
-            url: `https://osv.dev/vulnerability/${id}`,
-            affected_range_text: ""
-          });
-          if (loaded?.note) fact.notes.push(loaded.note);
+        if (fact.advisories_known && fact.advisories.length === 0) {
+          fact.notes.push(`No known advisories in OSV.dev as of ${nowDate().toISOString()}.`);
         }
       }
-      if (fact.advisories_known && fact.advisories.length === 0) {
-        fact.notes.push(`No known advisories in OSV.dev as of ${nowDate().toISOString()}.`);
+    }
+    if (fact.exists !== null) {
+      const malware = await githubMalware(draft.request.ecosystem, fact.name);
+      fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, malware.age);
+      fact.stale = fact.stale || malware.stale;
+      if (malware.note && !malware.note.includes("404")) fact.notes.push(malware.note);
+      if (malware.advisories.length) {
+        fact.sources.push(SOURCE.github);
+        for (const advisory of malware.advisories) {
+          if (!fact.advisories.some((item) => item.id === advisory.id)) fact.advisories.push(advisory);
+        }
+        fact.notes.push("Known malware records from the GitHub Advisory Database are included and attributed to that source.");
       }
     }
+    fact.advisories.sort((a, b) => Number(Boolean(b.malicious || b.id.startsWith("MAL-"))) - Number(Boolean(a.malicious || a.id.startsWith("MAL-"))));
     const sourceMap = new Map(fact.sources.map((source) => [source.id, source]));
     fact.sources = [...sourceMap.values()];
     fact.notes = uniqueNotes(fact.notes);
     return fact;
-  });
+  }));
 }
 
 async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
@@ -196,25 +211,32 @@ async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
     return blank(request, "That package name is not valid for this ecosystem. Nothing was looked up.");
   }
   const fact = blank(request);
-  const deps = await settle("depsdev", () => getPackage(request.ecosystem, request.name));
+  const onDepsDev = request.ecosystem !== "composer";
+  const deps = onDepsDev ? await settle("depsdev", () => getPackage(request.ecosystem, request.name)) : {};
   const registry = request.ecosystem === "npm"
     ? await settle("npm", () => packument(request.name))
     : request.ecosystem === "pypi"
       ? await settle("pypi", () => project(request.name))
-      : undefined;
+      : request.ecosystem === "rubygems"
+        ? await settle("rubygems", () => getGemVersions(request.name))
+        : request.ecosystem === "composer"
+          ? await settle("packagist", () => getComposerPackage(request.name))
+          : undefined;
   if (deps.error) fact.notes.push(deps.error);
   if (registry?.error) fact.notes.push(registry.error);
-  absorb(fact, deps.value, SOURCE.depsdev);
+  if (onDepsDev) absorb(fact, deps.value, SOURCE.depsdev);
   if (request.ecosystem === "npm") absorb(fact, registry?.value, SOURCE.npm);
   if (request.ecosystem === "pypi") absorb(fact, registry?.value, SOURCE.pypi);
+  if (request.ecosystem === "rubygems") absorb(fact, registry?.value, SOURCE.rubygems);
+  if (request.ecosystem === "composer") absorb(fact, registry?.value, SOURCE.packagist);
 
   const depsMissing = Boolean(deps.value?.negative);
   const registryMissing = Boolean(registry?.value?.negative);
   const depsKnown = Boolean(deps.value && !deps.value.negative);
   const registryKnown = Boolean(registry?.value && !registry.value.negative);
-  if (request.ecosystem === "npm" || request.ecosystem === "pypi") {
+  if (request.ecosystem === "npm" || request.ecosystem === "pypi" || request.ecosystem === "rubygems" || request.ecosystem === "composer") {
     if (registryMissing) fact.exists = false;
-    else if (registryKnown || depsKnown) fact.exists = true;
+    else if (registryKnown || (request.ecosystem !== "composer" && depsKnown)) fact.exists = true;
     else fact.exists = null;
   } else if (depsMissing) fact.exists = false;
   else if (depsKnown) fact.exists = true;
@@ -265,6 +287,47 @@ async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
   const info = asRecord(pypiBody?.info);
   const releases = asRecord(pypiBody?.releases);
   if (typeof info?.name === "string" && info.name) fact.name = info.name;
+  const gemVersions = request.ecosystem === "rubygems" && Array.isArray(registry?.value?.json) ? registry.value.json : [];
+  for (const entry of gemVersions) {
+    const row = asRecord(entry);
+    const version = typeof row?.number === "string" ? row.number : "";
+    if (!version) continue;
+    const current = versions.get(version) ?? { version, deprecated: false };
+    if (typeof row?.created_at === "string" && !current.publishedAt) current.publishedAt = row.created_at;
+    if (row?.yanked === true) current.deprecated = true;
+    versions.set(version, current);
+  }
+  let gemLatest = "";
+  if (request.ecosystem === "rubygems" && gemVersions.length) {
+    const newest = asRecord(gemVersions[0]);
+    gemLatest = typeof newest?.number === "string" ? newest.number : "";
+    const licenses = Array.isArray(newest?.licenses) ? newest.licenses.filter((item): item is string => typeof item === "string") : [];
+    if (licenses.length && !fact.declared_licenses.length) fact.declared_licenses = licenses.slice(0, 20);
+    fact.registry_url = `https://rubygems.org/gems/${encodeURIComponent(fact.name)}`;
+  }
+
+  const composerBody = request.ecosystem === "composer" ? asRecord(registry?.value?.json) : null;
+  const composerPackages = asRecord(composerBody?.packages);
+  const composerRows = composerPackages ? Object.values(composerPackages).flatMap((value) => Array.isArray(value) ? value : []) : [];
+  for (const entry of composerRows) {
+    const row = asRecord(entry);
+    const version = composerVersionOf(row);
+    if (!version || version.toLowerCase().includes("dev")) continue;
+    const current = versions.get(version) ?? { version, deprecated: false };
+    if (typeof row?.time === "string" && !current.publishedAt) current.publishedAt = row.time;
+    if (row?.abandoned) current.deprecated = true;
+    versions.set(version, current);
+  }
+  if (request.ecosystem === "composer" && fact.exists) {
+    fact.registry_url = `https://packagist.org/packages/${fact.name}`;
+    const newest = asRecord(composerRows[0]);
+    const licenses = Array.isArray(newest?.license) ? newest.license.filter((item): item is string => typeof item === "string") : [];
+    if (licenses.length) fact.declared_licenses = licenses.slice(0, 20);
+    const source = asRecord(newest?.source);
+    const repo = typeof source?.url === "string" ? githubHttps(source.url) : undefined;
+    if (repo) fact.repo_url = repo;
+  }
+
   if (releases) {
     for (const [version, files] of Object.entries(releases)) {
       const list = Array.isArray(files) ? files : [];
@@ -286,6 +349,7 @@ async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
   let latest = pool[pool.length - 1]?.version ?? "";
   if (request.ecosystem === "npm" && npmLatest && (request.includePrerelease || !isPrerelease(npmLatest))) latest = npmLatest;
   else if (request.ecosystem === "pypi" && typeof info?.version === "string") latest = info.version;
+  else if (gemLatest && (request.includePrerelease || !isPrerelease(gemLatest))) latest = gemLatest;
   else if (defaultVersion && (request.includePrerelease || !isPrerelease(defaultVersion))) latest = defaultVersion;
   if (latest) fact.latest_stable = latest;
   fact.latest_published_at = versions.get(latest)?.publishedAt;
@@ -328,7 +392,18 @@ async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
     }
   }
 
-  if (focus && fact.exists) {
+  if (request.ecosystem === "composer" && focus) {
+    const match = composerRows.map((entry) => asRecord(entry)).find((row) => composerVersionOf(row) === focus);
+    const licenses = Array.isArray(match?.license) ? match.license.filter((item): item is string => typeof item === "string") : [];
+    if (licenses.length) fact.declared_licenses = licenses.slice(0, 20);
+  }
+  if (request.ecosystem === "rubygems" && focus) {
+    const match = gemVersions.map((entry) => asRecord(entry)).find((row) => row?.number === focus);
+    const licenses = Array.isArray(match?.licenses) ? match.licenses.filter((item): item is string => typeof item === "string") : [];
+    if (licenses.length) fact.declared_licenses = licenses.slice(0, 20);
+  }
+
+  if (focus && fact.exists && request.ecosystem !== "composer") {
     const versionDoc = await settle("depsdev", () => getVersion(request.ecosystem, fact.name, focus));
     if (versionDoc.error) fact.notes.push(versionDoc.error);
     absorb(fact, versionDoc.value, SOURCE.depsdev);
@@ -363,6 +438,16 @@ async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
   }
   fact.notes = uniqueNotes(fact.notes);
   return fact;
+}
+
+function composerVersionOf(row: Record<string, unknown> | null): string {
+  if (!row) return "";
+  const normalized = typeof row.version_normalized === "string" ? row.version_normalized : "";
+  const parts = normalized.split(".").filter(Boolean);
+  if (parts.length >= 3 && parts.slice(3).every((part) => part === "0")) return parts.slice(0, 3).join(".");
+  if (normalized && !normalized.endsWith(".9999999")) return normalized;
+  const raw = typeof row.version === "string" ? row.version : "";
+  return raw.replace(/^v/i, "");
 }
 
 export async function versionMeta(ecosystem: Ecosystem, name: string, version: string): Promise<{ engines_node?: string; python_requires?: string; peers: Record<string, string> }> {

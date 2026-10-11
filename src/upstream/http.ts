@@ -4,7 +4,7 @@ import { NPM_ALERT_AT, NPM_HARD_STOP, OTHER_SOURCE_ALERT_AT, USER_AGENT, utcMont
 import { getStore, type CacheRow } from "../store.js";
 import { noteCacheHit, noteUpstream } from "../timing.js";
 
-export type SourceName = "osv" | "depsdev" | "npm" | "pypi" | "eol";
+export type SourceName = "osv" | "depsdev" | "npm" | "pypi" | "eol" | "github" | "rubygems" | "packagist";
 
 const ALLOWED_HOSTS = new Set([
   "api.osv.dev",
@@ -12,7 +12,10 @@ const ALLOWED_HOSTS = new Set([
   "registry.npmjs.org",
   "api.npmjs.org",
   "pypi.org",
-  "endoflife.date"
+  "endoflife.date",
+  "api.github.com",
+  "rubygems.org",
+  "repo.packagist.org"
 ]);
 
 const LABELS: Record<SourceName, string> = {
@@ -20,7 +23,10 @@ const LABELS: Record<SourceName, string> = {
   depsdev: "deps.dev",
   npm: "the npm registry",
   pypi: "PyPI",
-  eol: "endoflife.date"
+  eol: "endoflife.date",
+  github: "the GitHub API",
+  rubygems: "RubyGems",
+  packagist: "Packagist"
 };
 
 export class UpstreamError extends Error {
@@ -39,6 +45,9 @@ export function missMessage(source: SourceName): string {
   if (source === "osv") return "OSV.dev did not respond; no advisory list is shown instead of a guess.";
   if (source === "npm") return "The npm registry did not respond; registry details are not shown instead of a guess.";
   if (source === "pypi") return "PyPI did not respond; registry details are not shown instead of a guess.";
+  if (source === "github") return "The GitHub API did not respond; that source is omitted instead of a guess.";
+  if (source === "rubygems") return "RubyGems did not respond; registry details are not shown instead of a guess.";
+  if (source === "packagist") return "Packagist did not respond; registry details are not shown instead of a guess.";
   return "endoflife.date did not respond; no end-of-life date is shown instead of a guess.";
 }
 
@@ -78,7 +87,10 @@ const gates: Record<SourceName, Semaphore> = {
   depsdev: new Semaphore(8),
   npm: new Semaphore(6),
   pypi: new Semaphore(4),
-  eol: new Semaphore(2)
+  eol: new Semaphore(2),
+  github: new Semaphore(4),
+  rubygems: new Semaphore(4),
+  packagist: new Semaphore(4)
 };
 
 export function setFetchForTests(fn: FetchLike | null): void {
@@ -91,10 +103,15 @@ export function resetUpstreamForTests(): void {
   alerted.clear();
 }
 
-export function upstreamHealth(): Record<SourceName, "ok" | "degraded"> {
+/** Health keeps the original five keys. Other sources have circuits but are not added here. */
+export function upstreamHealth(): { osv: "ok" | "degraded"; depsdev: "ok" | "degraded"; npm: "ok" | "degraded"; pypi: "ok" | "degraded"; eol: "ok" | "degraded" } {
   const now = nowMs();
   const status = (source: SourceName): "ok" | "degraded" => (circuits.get(source) ?? 0) > now ? "degraded" : "ok";
   return { osv: status("osv"), depsdev: status("depsdev"), npm: status("npm"), pypi: status("pypi"), eol: status("eol") };
+}
+
+export async function dispatchFetch(url: string, init: RequestInit): Promise<Response> {
+  return doFetch(url, init);
 }
 
 function retryDelay(): number {
@@ -210,6 +227,7 @@ export async function cachedJson(options: {
   body?: unknown;
   ttlSeconds: number;
   accept?: string;
+  extraHeaders?: Record<string, string>;
   countNpm?: boolean;
 }): Promise<CachedJson> {
   const method = options.method ?? "GET";
@@ -240,6 +258,9 @@ export async function cachedJson(options: {
     if (options.countNpm || options.source === "npm") await guardNpm();
     const headers = new Headers();
     if (options.accept) headers.set("Accept", options.accept);
+    if (options.extraHeaders) {
+      for (const [name, value] of Object.entries(options.extraHeaders)) headers.set(name, value);
+    }
     if (cached?.etag) headers.set("If-None-Match", cached.etag);
     if (cached?.last_modified) headers.set("If-Modified-Since", cached.last_modified);
     if (options.body !== undefined) headers.set("Content-Type", "application/json");

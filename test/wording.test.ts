@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { LIMITS, TRIAL_DAYS } from "../src/config.js";
+import { trialCardPhrase } from "../src/pages.js";
 
 const BANNED = [
   /\bsafe\b/i,
@@ -23,7 +24,12 @@ const SCAN = [
   "src/html.ts",
   "src/mailer.ts",
   "src/operations.ts",
-  "src/server.ts"
+  "src/server.ts",
+  "src/verdict.ts",
+  "src/license.ts",
+  "src/release-notes.ts",
+  "src/webhooks.ts",
+  "src/watch-job.ts"
 ];
 
 function read(rel: string): string {
@@ -68,10 +74,12 @@ describe("public wording", () => {
     const pricing = splitPrices(read("README.md")).allowed;
     expect(pricing).toContain("$7.99/month");
     expect(pricing).toContain("$79.99/year");
-    expect(pricing.toLowerCase()).toContain("card is required");
+    expect(pricing.toLowerCase()).not.toContain("card is required");
+    expect(pricing.toLowerCase()).not.toContain("card required");
     const pages = splitPrices(read("src/pages.ts")).allowed;
     expect(pages).toContain("$7.99/month");
     expect(pages).toContain("$79.99/year");
+    expect(trialCardPhrase()).toBe("");
   });
 
   it("keeps published plan numbers in config", () => {

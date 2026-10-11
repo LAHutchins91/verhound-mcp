@@ -10,6 +10,8 @@ export interface Advisory {
   url: string;
   affected_range_text: string;
   first_fixed_version?: string;
+  /** True for a known malware record (OpenSSF MAL-* or a GitHub malware advisory). */
+  malicious?: boolean;
 }
 
 interface OsvEvent {
@@ -127,6 +129,7 @@ export function advisoryFromOsv(raw: unknown, version?: string): Advisory | null
     affected_range_text: rangeText(vuln)
   };
   if (severity) advisory.severity = severity;
+  if (id.startsWith("MAL-")) advisory.malicious = true;
   const fixed = firstFixed(vuln, version);
   if (fixed) advisory.first_fixed_version = fixed;
   return advisory;

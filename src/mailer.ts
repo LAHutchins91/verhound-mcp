@@ -8,6 +8,7 @@ export interface DigestAlert {
   severity: string | null;
   first_fixed_version: string | null;
   url: string;
+  malicious?: boolean;
 }
 
 export interface AlertDigest {
@@ -33,7 +34,9 @@ export function renderDigest(digest: AlertDigest): { subject: string; text: stri
   const labels = [...new Set(digest.alerts.map((alert) => alert.label))];
   const label = labels.length === 1 ? labels[0] : `${labels.length} watched manifests`;
   const subject = `Verhound: ${digest.alerts.length} new advisories in ${label}`;
-  const blocks = digest.alerts.map((alert) => [
+  const ordered = [...digest.alerts].sort((a, b) => Number(Boolean(b.malicious)) - Number(Boolean(a.malicious)));
+  const blocks = ordered.map((alert) => [
+    alert.malicious ? "Known malware record." : "",
     `${alert.package}@${alert.version} (${alert.label})`,
     `Advisory: ${alert.advisory_id}`,
     alert.severity ? `Severity: ${alert.severity}` : "",

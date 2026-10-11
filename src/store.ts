@@ -45,6 +45,9 @@ export interface WatchRecord {
   last_checked_at: string | null;
   baseline_complete: boolean;
   email: string | null;
+  webhook_url: string | null;
+  license_allow: string[];
+  license_deny: string[];
 }
 
 export interface AlertRecord {
@@ -60,6 +63,7 @@ export interface AlertRecord {
   url: string;
   detected_at: string;
   emailed_at: string | null;
+  malicious: boolean;
 }
 
 export interface ConsumeResult {
@@ -86,6 +90,7 @@ export interface DataStore {
   deleteWatch(accountId: string, label: string): Promise<boolean>;
   countWatches(accountId: string): Promise<number>;
   listDueWatches(limit: number, offset: number, olderThanIso: string): Promise<WatchRecord[]>;
+  countDueWatches(olderThanIso: string): Promise<number>;
   markSeen(watchId: string, advisoryId: string, pkg: string, version: string, at: string): Promise<boolean>;
   addAlert(alert: AlertRecord): Promise<void>;
   listAlerts(accountId: string, opts: { label?: string; since?: string; limit: number }): Promise<AlertRecord[]>;
@@ -303,6 +308,10 @@ class MemoryStore implements DataStore {
       return (a.last_checked_at ?? "").localeCompare(b.last_checked_at ?? "");
     });
     return due.slice(offset, offset + limit);
+  }
+
+  async countDueWatches(olderThanIso: string): Promise<number> {
+    return [...this.watches.values()].filter((watch) => !watch.last_checked_at || watch.last_checked_at < olderThanIso).length;
   }
 
   async markSeen(watchId: string, advisoryId: string, pkg: string, version: string, _at: string): Promise<boolean> {
@@ -613,6 +622,19 @@ class SupabaseStore implements DataStore {
     const response = await sb(path, { method: "GET" });
     if (!response.ok) throw new Error("Could not list due watches.");
     return await response.json() as WatchRecord[];
+  }
+
+  async countDueWatches(olderThanIso: string): Promise<number> {
+    const path = `watches?or=(last_checked_at.is.null,last_checked_at.lt.${encodeURIComponent(olderThanIso)})&select=id`;
+    const response = await sb(path, { method: "GET", headers: { Prefer: "count=exact" } });
+    const range = response.headers.get("content-range");
+    if (range && range.includes("/")) {
+      const total = Number(range.split("/")[1]);
+      if (Number.isFinite(total)) return total;
+    }
+    if (!response.ok) return 0;
+    const rows = await response.json() as unknown[];
+    return rows.length;
   }
 
   async markSeen(watchId: string, advisoryId: string, pkg: string, version: string, at: string): Promise<boolean> {
