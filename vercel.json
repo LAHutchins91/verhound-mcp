@@ -1,5 +1,7 @@
 {
-  "version": 2,
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build && mkdir -p public && cp logo.jpg public/logo.jpg",
+  "outputDirectory": "public",
   "functions": {
     "api/index.ts": {
       "memory": 1024,
@@ -11,28 +13,9 @@
       "maxDuration": 30
     }
   },
-  "builds": [
-    {
-      "src": "api/index.ts",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["logo.jpg"],
-        "memory": 1024,
-        "maxDuration": 20
-      }
-    },
-    {
-      "src": "api/cron/watch.ts",
-      "use": "@vercel/node",
-      "config": {
-        "memory": 1024,
-        "maxDuration": 30
-      }
-    }
-  ],
-  "routes": [
-    { "src": "/api/cron/watch", "dest": "api/cron/watch.ts" },
-    { "src": "/(.*)", "dest": "api/index.ts" }
+  "rewrites": [
+    { "source": "/api/cron/watch", "destination": "/api/cron/watch" },
+    { "source": "/(.*)", "destination": "/api" }
   ],
   "crons": [
     { "path": "/api/cron/watch", "schedule": "0 11 * * *" }
