@@ -338,10 +338,12 @@ class SupabaseStore implements DataStore {
     if (!existing) {
       const createdAt = nowDate().toISOString();
       const created: Account = { id, email: email ?? null, plan: plan ?? "trial", created_at: createdAt, trial_started_at: createdAt };
-      const response = await sb("accounts", { method: "POST", prefer: "return=representation", body: JSON.stringify(created) });
+      // Ignore a duplicate insert so two first calls for one account do not fail.
+      const response = await sb("accounts?on_conflict=id", { method: "POST", prefer: "resolution=ignore-duplicates,return=representation", body: JSON.stringify(created) });
       if (!response.ok) throw new Error("Could not save the account.");
       const rows = await response.json() as Account[];
-      return rows[0] ?? created;
+      if (rows[0]) return rows[0];
+      return (await this.getAccount(id)) ?? created;
     }
     if ((email && email !== existing.email) || (plan === "pro" && existing.plan !== "pro")) {
       const patch: Partial<Account> = {};
@@ -537,7 +539,7 @@ class SupabaseStore implements DataStore {
   async listAlerts(accountId: string, opts: { label?: string; since?: string; limit: number }): Promise<AlertRecord[]> {
     let path = `alerts?account_id=eq.${encodeURIComponent(accountId)}&select=*,watches(label)&order=detected_at.desc&limit=${opts.limit}`;
     if (opts.since) path += `&detected_at=gte.${encodeURIComponent(opts.since)}`;
-    if (opts.label) path += `&watches.label=eq.${encodeURIComponent(opts.label)}`;
+    if (opts.label) path += `&label=eq.${encodeURIComponent(opts.label)}`;
     const response = await sb(path, { method: "GET" });
     if (!response.ok) throw new Error("Could not list alerts.");
     const rows = await response.json() as (AlertRecord & { watches?: { label?: string } | { label?: string }[] })[];
