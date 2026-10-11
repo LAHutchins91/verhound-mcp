@@ -16,6 +16,7 @@ import { contentHash } from "./text.js";
 import { weeklyDownloads } from "./upstream/npm.js";
 import { beginCall } from "./usage.js";
 import { packageVerdict, publishedUnder72Hours, publishedWithin } from "./verdict.js";
+import { WebhookKeyError } from "./webhook-crypto.js";
 import { webhookHostLabel, webhookKind } from "./webhooks.js";
 
 const LOW_DOWNLOADS = 100;
@@ -458,20 +459,26 @@ export async function watchManifest(access: Access, input: { label: string; file
   for (const dep of deps) summary[dep.ecosystem] = (summary[dep.ecosystem] ?? 0) + 1;
   const email = input.alertEmail === "account" ? access.email : null;
   const policy: LicensePolicy = { allow: input.licenseAllow, deny: input.licenseDeny };
-  const watch = await store.saveWatch({
-    account_id: access.accountId,
-    label: input.label,
-    filename: input.filename.split(/[/\\]/).pop()?.slice(0, 120) || "manifest",
-    ecosystem_summary: summary,
-    deps,
-    min_severity: input.minSeverity ?? "low",
-    last_checked_at: nowDate().toISOString(),
-    baseline_complete: true,
-    email,
-    webhook_url: webhook || null,
-    license_allow: input.licenseAllow ?? [],
-    license_deny: input.licenseDeny ?? []
-  });
+  let watch;
+  try {
+    watch = await store.saveWatch({
+      account_id: access.accountId,
+      label: input.label,
+      filename: input.filename.split(/[/\\]/).pop()?.slice(0, 120) || "manifest",
+      ecosystem_summary: summary,
+      deps,
+      min_severity: input.minSeverity ?? "low",
+      last_checked_at: nowDate().toISOString(),
+      baseline_complete: true,
+      email,
+      webhook_url: webhook || null,
+      license_allow: input.licenseAllow ?? [],
+      license_deny: input.licenseDeny ?? []
+    });
+  } catch (error) {
+    if (error instanceof WebhookKeyError) return toolError("Webhook storage is not configured.");
+    throw error;
+  }
   const seenAt = nowDate().toISOString();
   if (deps.length) {
     const facts = await lookupPackages(deps.map((dep) => ({ ecosystem: dep.ecosystem as Ecosystem, name: dep.name, version: dep.version })));
@@ -544,12 +551,15 @@ export async function unwatchManifest(access: Access, label: string): Promise<To
   return finish({ deleted }, [], [], 0, false);
 }
 
-export async function recordNewAlert(watch: WatchRecord, alert: Omit<AlertRecord, "id" | "detected_at" | "emailed_at" | "malicious" | "label"> & { malicious?: boolean }): Promise<AlertRecord> {
+export async function recordNewAlert(watch: WatchRecord, alert: Omit<AlertRecord, "id" | "detected_at" | "emailed_at" | "webhook_sent_at" | "email_claim_at" | "webhook_claim_at" | "malicious" | "label"> & { malicious?: boolean }): Promise<AlertRecord> {
   const row: AlertRecord = {
     ...alert,
     id: crypto.randomUUID(),
     detected_at: nowDate().toISOString(),
     emailed_at: null,
+    webhook_sent_at: null,
+    email_claim_at: null,
+    webhook_claim_at: null,
     label: watch.label,
     malicious: Boolean(alert.malicious || alert.advisory_id.startsWith("MAL-"))
   };

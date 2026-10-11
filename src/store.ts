@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { nowDate, nowMs } from "./clock.js";
 import type { Plan } from "./config.js";
+import { flagWebhookNeedsKey, readWebhookUrl, sealForStorage } from "./webhook-crypto.js";
 
 export interface Account {
   id: string;
@@ -8,6 +9,7 @@ export interface Account {
   plan: Plan;
   created_at: string;
   trial_started_at: string;
+  stripe_customer_id?: string | null;
 }
 
 export interface UsageRow {
@@ -64,7 +66,13 @@ export interface AlertRecord {
   detected_at: string;
   emailed_at: string | null;
   malicious: boolean;
+  /** Set after the Slack or Discord post succeeds. Null means still pending. */
+  webhook_sent_at: string | null;
+  email_claim_at: string | null;
+  webhook_claim_at: string | null;
 }
+
+export type AlertChannel = "email" | "webhook";
 
 export interface ConsumeResult {
   allowed: boolean;
@@ -96,6 +104,13 @@ export interface DataStore {
   listAlerts(accountId: string, opts: { label?: string; since?: string; limit: number }): Promise<AlertRecord[]>;
   markEmailed(ids: string[], at: string): Promise<void>;
   emailedOnDay(accountId: string, dayStartIso: string): Promise<boolean>;
+  getWatchById(id: string): Promise<WatchRecord | null>;
+  hasTrial(emailHash: string): Promise<boolean>;
+  setStripeCustomer(id: string, customerId: string): Promise<void>;
+  listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]>;
+  claimAlerts(channel: AlertChannel, ids: string[], at: string, staleBefore: string): Promise<string[]>;
+  markWebhooksSent(ids: string[], at: string): Promise<void>;
+  releaseAlertClaims(channel: AlertChannel, ids: string[]): Promise<void>;
   /** Record that a normalized email used a trial. Returns the first time it was used. Survives account deletion. */
   claimTrial(emailHash: string, accountId: string, atIso: string): Promise<string>;
   setTrialStart(id: string, startedIso: string): Promise<void>;
@@ -114,6 +129,28 @@ function locked<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
 
 function emptyUsage(): UsageRow {
   return { calls: 0, packages: 0, plan_upgrade_calls: 0 };
+}
+
+function exposeWatch(watch: WatchRecord, rewrite: (sealed: string) => void): WatchRecord {
+  const read = readWebhookUrl(watch.webhook_url);
+  if (read.rewrite) rewrite(read.rewrite);
+  const copy: WatchRecord = { ...watch, webhook_url: read.url };
+  if (read.blocked) flagWebhookNeedsKey(copy);
+  return copy;
+}
+
+function claimable(alert: AlertRecord, channel: AlertChannel, at: string, staleBefore: string): boolean {
+  if (channel === "email") {
+    if (alert.emailed_at) return false;
+    return !alert.email_claim_at || alert.email_claim_at < staleBefore || alert.email_claim_at === at;
+  }
+  if (alert.webhook_sent_at) return false;
+  return !alert.webhook_claim_at || alert.webhook_claim_at < staleBefore || alert.webhook_claim_at === at;
+}
+
+function pending(alert: AlertRecord, channel: AlertChannel): boolean {
+  if (channel === "email") return alert.emailed_at == null;
+  return alert.webhook_sent_at == null;
 }
 
 class MemoryStore implements DataStore {
@@ -257,6 +294,7 @@ class MemoryStore implements DataStore {
     const now = nowDate().toISOString();
     const watch: WatchRecord = {
       ...input,
+      webhook_url: sealForStorage(input.webhook_url),
       id: existing?.id ?? input.id ?? crypto.randomUUID(),
       created_at: existing?.created_at ?? now,
       updated_at: now
@@ -268,7 +306,9 @@ class MemoryStore implements DataStore {
       }
       this.alerts = this.alerts.filter((alert) => alert.watch_id !== watch.id);
     }
-    return watch;
+    return exposeWatch(watch, (sealed) => {
+      watch.webhook_url = sealed;
+    });
   }
 
   async updateWatchMeta(accountId: string, label: string, patch: Partial<Pick<WatchRecord, "last_checked_at" | "baseline_complete" | "email">>): Promise<void> {
@@ -278,11 +318,25 @@ class MemoryStore implements DataStore {
   }
 
   async listWatches(accountId: string): Promise<WatchRecord[]> {
-    return [...this.watches.values()].filter((watch) => watch.account_id === accountId);
+    return [...this.watches.values()].filter((watch) => watch.account_id === accountId).map((watch) => this.opened(watch));
   }
 
   async getWatch(accountId: string, label: string): Promise<WatchRecord | null> {
-    return this.watches.get(`${accountId}|${label}`) ?? null;
+    const watch = this.watches.get(`${accountId}|${label}`);
+    return watch ? this.opened(watch) : null;
+  }
+
+  async getWatchById(id: string): Promise<WatchRecord | null> {
+    for (const watch of this.watches.values()) {
+      if (watch.id === id) return this.opened(watch);
+    }
+    return null;
+  }
+
+  private opened(watch: WatchRecord): WatchRecord {
+    return exposeWatch(watch, (sealed) => {
+      watch.webhook_url = sealed;
+    });
   }
 
   async deleteWatch(accountId: string, label: string): Promise<boolean> {
@@ -307,7 +361,7 @@ class MemoryStore implements DataStore {
       if (a.last_checked_at && !b.last_checked_at) return 1;
       return (a.last_checked_at ?? "").localeCompare(b.last_checked_at ?? "");
     });
-    return due.slice(offset, offset + limit);
+    return due.slice(offset, offset + limit).map((watch) => this.opened(watch));
   }
 
   async countDueWatches(olderThanIso: string): Promise<number> {
@@ -337,12 +391,57 @@ class MemoryStore implements DataStore {
   async markEmailed(ids: string[], at: string): Promise<void> {
     const wanted = new Set(ids);
     for (const alert of this.alerts) {
-      if (wanted.has(alert.id)) alert.emailed_at = at;
+      if (!wanted.has(alert.id)) continue;
+      alert.emailed_at = at;
+      alert.email_claim_at = null;
     }
   }
 
   async emailedOnDay(accountId: string, dayStartIso: string): Promise<boolean> {
     return this.alerts.some((alert) => alert.account_id === accountId && alert.emailed_at !== null && alert.emailed_at >= dayStartIso);
+  }
+
+  async hasTrial(emailHash: string): Promise<boolean> {
+    return this.trialMarkers.has(emailHash);
+  }
+
+  async setStripeCustomer(id: string, customerId: string): Promise<void> {
+    const account = await this.ensureAccount(id);
+    account.stripe_customer_id = customerId;
+  }
+
+  async listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]> {
+    return this.alerts.filter((alert) => pending(alert, channel)).sort((a, b) => a.detected_at.localeCompare(b.detected_at)).slice(0, limit);
+  }
+
+  async claimAlerts(channel: AlertChannel, ids: string[], at: string, staleBefore: string): Promise<string[]> {
+    const wanted = new Set(ids);
+    const claimed: string[] = [];
+    for (const alert of this.alerts) {
+      if (!wanted.has(alert.id) || !claimable(alert, channel, at, staleBefore)) continue;
+      if (channel === "email") alert.email_claim_at = at;
+      else alert.webhook_claim_at = at;
+      claimed.push(alert.id);
+    }
+    return claimed;
+  }
+
+  async markWebhooksSent(ids: string[], at: string): Promise<void> {
+    const wanted = new Set(ids);
+    for (const alert of this.alerts) {
+      if (!wanted.has(alert.id)) continue;
+      alert.webhook_sent_at = at;
+      alert.webhook_claim_at = null;
+    }
+  }
+
+  async releaseAlertClaims(channel: AlertChannel, ids: string[]): Promise<void> {
+    const wanted = new Set(ids);
+    for (const alert of this.alerts) {
+      if (!wanted.has(alert.id)) continue;
+      if (channel === "email") alert.email_claim_at = null;
+      else alert.webhook_claim_at = null;
+    }
   }
 }
 
@@ -555,6 +654,7 @@ class SupabaseStore implements DataStore {
     const now = nowDate().toISOString();
     const watch: WatchRecord = {
       ...input,
+      webhook_url: sealForStorage(input.webhook_url),
       id: existing?.id ?? input.id ?? crypto.randomUUID(),
       created_at: existing?.created_at ?? now,
       updated_at: now
@@ -570,7 +670,18 @@ class SupabaseStore implements DataStore {
       await sb(`alerts?watch_id=eq.${encodeURIComponent(watch.id)}`, { method: "DELETE", prefer: "return=minimal" });
     }
     const rows = await response.json() as WatchRecord[];
-    return rows[0] ?? watch;
+    return this.presentRemote(rows[0] ?? watch);
+  }
+
+  private async presentRemote(watch: WatchRecord): Promise<WatchRecord> {
+    const read = readWebhookUrl(watch.webhook_url);
+    if (read.rewrite && watch.id && watch.webhook_url) {
+      const path = `watches?id=eq.${encodeURIComponent(watch.id)}&webhook_url=eq.${encodeURIComponent(watch.webhook_url)}`;
+      await sb(path, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify({ webhook_url: read.rewrite }) }).catch(() => undefined);
+    }
+    const copy: WatchRecord = { ...watch, webhook_url: read.url };
+    if (read.blocked) flagWebhookNeedsKey(copy);
+    return copy;
   }
 
   async updateWatchMeta(accountId: string, label: string, patch: Partial<Pick<WatchRecord, "last_checked_at" | "baseline_complete" | "email">>): Promise<void> {
@@ -585,14 +696,22 @@ class SupabaseStore implements DataStore {
   async listWatches(accountId: string): Promise<WatchRecord[]> {
     const response = await sb(`watches?account_id=eq.${encodeURIComponent(accountId)}&select=*`, { method: "GET" });
     if (!response.ok) throw new Error("Could not list watches.");
-    return await response.json() as WatchRecord[];
+    const rows = await response.json() as WatchRecord[];
+    return Promise.all(rows.map((row) => this.presentRemote(row)));
   }
 
   async getWatch(accountId: string, label: string): Promise<WatchRecord | null> {
     const response = await sb(`watches?account_id=eq.${encodeURIComponent(accountId)}&label=eq.${encodeURIComponent(label)}&select=*`, { method: "GET" });
     if (!response.ok) throw new Error("Could not read the watch.");
     const rows = await response.json() as WatchRecord[];
-    return rows[0] ?? null;
+    return rows[0] ? this.presentRemote(rows[0]) : null;
+  }
+
+  async getWatchById(id: string): Promise<WatchRecord | null> {
+    const response = await sb(`watches?id=eq.${encodeURIComponent(id)}&select=*`, { method: "GET" });
+    if (!response.ok) throw new Error("Could not read the watch.");
+    const rows = await response.json() as WatchRecord[];
+    return rows[0] ? this.presentRemote(rows[0]) : null;
   }
 
   async deleteWatch(accountId: string, label: string): Promise<boolean> {
@@ -621,7 +740,8 @@ class SupabaseStore implements DataStore {
     const path = `watches?or=(last_checked_at.is.null,last_checked_at.lt.${encodeURIComponent(olderThanIso)})&order=last_checked_at.asc.nullsfirst&limit=${limit}&offset=${offset}&select=*`;
     const response = await sb(path, { method: "GET" });
     if (!response.ok) throw new Error("Could not list due watches.");
-    return await response.json() as WatchRecord[];
+    const rows = await response.json() as WatchRecord[];
+    return Promise.all(rows.map((row) => this.presentRemote(row)));
   }
 
   async countDueWatches(olderThanIso: string): Promise<number> {
@@ -672,7 +792,7 @@ class SupabaseStore implements DataStore {
     const response = await sb(`alerts?id=in.(${list})`, {
       method: "PATCH",
       prefer: "return=minimal",
-      body: JSON.stringify({ emailed_at: at })
+      body: JSON.stringify({ emailed_at: at, email_claim_at: null })
     });
     if (!response.ok) throw new Error("Could not mark alerts emailed.");
   }
@@ -682,6 +802,69 @@ class SupabaseStore implements DataStore {
     if (!response.ok) return false;
     const rows = await response.json() as unknown[];
     return rows.length > 0;
+  }
+
+  async hasTrial(emailHash: string): Promise<boolean> {
+    const response = await sb(`trial_markers?email_hash=eq.${encodeURIComponent(emailHash)}&select=email_hash&limit=1`, { method: "GET" });
+    if (!response.ok) throw new Error("Could not read the trial.");
+    const rows = await response.json() as unknown[];
+    return rows.length > 0;
+  }
+
+  async setStripeCustomer(id: string, customerId: string): Promise<void> {
+    this.forget(id);
+    const response = await sb(`accounts?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      prefer: "return=minimal",
+      body: JSON.stringify({ stripe_customer_id: customerId })
+    });
+    if (!response.ok) throw new Error("Could not save the billing customer.");
+  }
+
+  async listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]> {
+    const column = channel === "email" ? "emailed_at" : "webhook_sent_at";
+    const response = await sb(`alerts?${column}=is.null&order=detected_at.asc&limit=${limit}&select=*`, { method: "GET" });
+    if (!response.ok) throw new Error("Could not list pending alerts.");
+    return await response.json() as AlertRecord[];
+  }
+
+  async claimAlerts(channel: AlertChannel, ids: string[], at: string, staleBefore: string): Promise<string[]> {
+    if (!ids.length) return [];
+    const list = ids.map((id) => `"${id}"`).join(",");
+    const column = channel === "email" ? "email_claim_at" : "webhook_claim_at";
+    const done = channel === "email" ? "emailed_at" : "webhook_sent_at";
+    const path = `alerts?id=in.(${list})&${done}=is.null&or=(${column}.is.null,${column}.lt.${encodeURIComponent(staleBefore)})`;
+    const response = await sb(path, {
+      method: "PATCH",
+      prefer: "return=representation",
+      body: JSON.stringify({ [column]: at })
+    });
+    if (!response.ok) throw new Error("Could not claim alerts.");
+    const rows = await response.json() as { id: string }[];
+    return rows.map((row) => row.id);
+  }
+
+  async markWebhooksSent(ids: string[], at: string): Promise<void> {
+    if (!ids.length) return;
+    const list = ids.map((id) => `"${id}"`).join(",");
+    const response = await sb(`alerts?id=in.(${list})`, {
+      method: "PATCH",
+      prefer: "return=minimal",
+      body: JSON.stringify({ webhook_sent_at: at, webhook_claim_at: null })
+    });
+    if (!response.ok) throw new Error("Could not mark webhooks sent.");
+  }
+
+  async releaseAlertClaims(channel: AlertChannel, ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const list = ids.map((id) => `"${id}"`).join(",");
+    const column = channel === "email" ? "email_claim_at" : "webhook_claim_at";
+    const response = await sb(`alerts?id=in.(${list})`, {
+      method: "PATCH",
+      prefer: "return=minimal",
+      body: JSON.stringify({ [column]: null })
+    });
+    if (!response.ok) throw new Error("Could not release alert claims.");
   }
 }
 

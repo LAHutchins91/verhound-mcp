@@ -1,4 +1,4 @@
--- Verhound schema, file 3 of 4.
+-- Verhound schema, file 3 of 5.
 -- Apply after 002_advisor_fixes.sql in the Supabase SQL editor.
 -- This repository does not apply these files.
 -- One Pro trial per normalized email, and one-time use for OAuth codes and refresh tokens.

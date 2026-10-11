@@ -17,12 +17,13 @@ export interface AlertDigest {
 }
 
 export interface Mailer {
-  sendAlert(to: string, digest: AlertDigest): Promise<void>;
+  /** "skipped" leaves the alert pending so a later run can send it. */
+  sendAlert(to: string, digest: AlertDigest): Promise<"sent" | "skipped">;
 }
 
 export class NoopMailer implements Mailer {
-  async sendAlert(): Promise<void> {
-    return undefined;
+  async sendAlert(): Promise<"skipped"> {
+    return "skipped";
   }
 }
 
@@ -60,10 +61,10 @@ export function renderDigest(digest: AlertDigest): { subject: string; text: stri
 export class ResendMailer implements Mailer {
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
-  async sendAlert(to: string, digest: AlertDigest): Promise<void> {
+  async sendAlert(to: string, digest: AlertDigest): Promise<"sent" | "skipped"> {
     const key = process.env.RESEND_API_KEY?.trim();
     const from = process.env.ALERT_FROM?.trim();
-    if (!key || !from) return;
+    if (!key || !from) return "skipped";
     const { subject, text } = renderDigest(digest);
     const response = await this.fetchImpl("https://api.resend.com/emails", {
       method: "POST",
@@ -74,10 +75,22 @@ export class ResendMailer implements Mailer {
       body: JSON.stringify({ from, to: [to], subject, text })
     });
     if (!response.ok) throw new Error("The alert email was not accepted.");
+    return "sent";
   }
 }
 
+let testMailer: Mailer | null = null;
+
+export function setMailerForTests(mailer: Mailer | null): void {
+  testMailer = mailer;
+}
+
+export function mailWillSend(): boolean {
+  return testMailer !== null || mailConfigured();
+}
+
 export function getMailer(): Mailer {
+  if (testMailer) return testMailer;
   if (!mailConfigured()) return new NoopMailer();
   return new ResendMailer();
 }

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { isBillingConfigured } from "./billing.js";
 import { PUBLIC_BRAND, SCOPE, publicBase, resourceUrl } from "./config.js";
 import { escapeHtml, page } from "./html.js";
 import { identityConfigured, sendEmailOtp, verifyEmailOtp } from "./identity.js";
@@ -212,7 +213,7 @@ function redirectError(redirectUri: string, error: string, state: string): strin
 
 async function finishCode(res: Response, base: string, fields: Record<string, string>, sub: string, email: string | null, plan?: "pro"): Promise<void> {
   await getStore().ensureAccount(sub, email, plan);
-  if (email && plan !== "pro") await applyTrialMarker(sub, email);
+  if (email && plan !== "pro" && !isBillingConfigured()) await applyTrialMarker(sub, email);
   const secure = base.startsWith("https://");
   const code = signToken({
     typ: "code",

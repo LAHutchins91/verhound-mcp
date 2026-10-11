@@ -1,4 +1,4 @@
--- Verhound schema, file 4 of 4.
+-- Verhound schema, file 4 of 5.
 -- Apply after 003_trials_and_token_use.sql in the Supabase SQL editor.
 -- This repository does not apply these files.
 -- Allows the free plan, stores an optional Slack or Discord webhook on a watch,

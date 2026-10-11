@@ -3,9 +3,18 @@ import { TRIAL_DAYS, type Plan } from "./config.js";
 import { configuredReviewerEmail, isReviewerAccount } from "./reviewer.js";
 import { getStore } from "./store.js";
 
-/** Checkout is not wired. Pro is an account flag, not a payment call. */
+/** Set only when checkout, the webhook, and both price ids are present. No Stripe objects are created here. */
+export function billingConfig(): { secretKey: string; webhookSecret: string; monthlyPrice: string; yearlyPrice: string } | null {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim() ?? "";
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() ?? "";
+  const monthlyPrice = process.env.STRIPE_PRICE_MONTHLY?.trim() ?? "";
+  const yearlyPrice = process.env.STRIPE_PRICE_YEARLY?.trim() ?? "";
+  if (!secretKey || !webhookSecret || !monthlyPrice || !yearlyPrice) return null;
+  return { secretKey, webhookSecret, monthlyPrice, yearlyPrice };
+}
+
 export function isBillingConfigured(): boolean {
-  return false;
+  return billingConfig() !== null;
 }
 
 export interface Access {
@@ -41,6 +50,16 @@ export async function accessFor(accountId: string): Promise<Access> {
   const email = account?.email ?? null;
   if (account?.plan === "pro") {
     return { accountId, plan: "pro", expired: false, emailRequired: false, trialEndsAt: null, email };
+  }
+  if (isBillingConfigured()) {
+    return {
+      accountId,
+      plan: "free",
+      expired: account?.plan === "free",
+      emailRequired: !email,
+      trialEndsAt: null,
+      email
+    };
   }
   if (!email) {
     return { accountId, plan: "free", expired: false, emailRequired: true, trialEndsAt: null, email: null };

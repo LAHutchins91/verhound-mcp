@@ -5,6 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { bearerAccess, installOAuth } from "./auth.js";
 import { accessFor, isBillingConfigured, type Access } from "./billing.js";
+import { captureStripeRawBody, installBilling } from "./billing-stripe.js";
 import { PRODUCT, publicBase, SERVICE, VERSION } from "./config.js";
 import { MCP_CORS_HEADERS, mcpBrowserOriginAllowed } from "./mcp-clients.js";
 import { mailConfigured } from "./mailer.js";
@@ -30,7 +31,13 @@ app.use((_req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({
+  limit: "2mb",
+  verify(req, _res, buf) {
+    const url = req.url ?? "";
+    if (url === "/billing/webhook" || url.startsWith("/billing/webhook?")) captureStripeRawBody(req as Request, buf);
+  }
+}));
 app.use(express.urlencoded({ extended: false, limit: "2mb" }));
 
 export function logoFile(): string {
@@ -77,6 +84,7 @@ app.get("/.well-known/openai-apps-challenge", (_req, res) => {
 });
 
 installPages(app);
+installBilling(app);
 app.use([
   "/mcp",
   "/register",

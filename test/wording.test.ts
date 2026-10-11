@@ -29,7 +29,9 @@ const SCAN = [
   "src/license.ts",
   "src/release-notes.ts",
   "src/webhooks.ts",
-  "src/watch-job.ts"
+  "src/watch-job.ts",
+  "src/webhook-crypto.ts",
+  "src/billing-stripe.ts"
 ];
 
 function read(rel: string): string {

@@ -2,13 +2,14 @@ import type { Express, Request, Response } from "express";
 import { advisoryFromOsv, severityRank } from "./advisories.js";
 import { nowDate, nowMs } from "./clock.js";
 import { WATCH_STALE_MS, nextEtMidnight, publicBase, type Ecosystem } from "./config.js";
-import { getMailer, type DigestAlert } from "./mailer.js";
+import { getMailer, mailWillSend, type DigestAlert } from "./mailer.js";
 import { recordNewAlert } from "./operations.js";
 import { timingSafeEqualText } from "./reviewer.js";
 import { cronBlocked } from "./runtime-config.js";
 import { getStore, type AlertRecord, type WatchRecord } from "./store.js";
 import { logCronTiming } from "./timing.js";
 import { getVuln, queryBatch } from "./upstream/osv.js";
+import { webhookNeedsKey } from "./webhook-crypto.js";
 import { postWebhook, webhookHostLabel } from "./webhooks.js";
 
 /**
@@ -20,6 +21,16 @@ import { postWebhook, webhookHostLabel } from "./webhooks.js";
 const BUDGET_MS = 20_000;
 const CONCURRENCY = 4;
 const RETRY_MS = 60 * 60 * 1000;
+const CLAIM_STALE_MS = 15 * 60 * 1000;
+let budgetOverride: number | null = null;
+
+export function setWatchBudgetForTests(ms: number | null): void {
+  budgetOverride = ms;
+}
+
+function budgetMs(): number {
+  return budgetOverride ?? BUDGET_MS;
+}
 
 function authorized(authorization: string | undefined, alt: string | undefined): "ok" | "missing" | "rejected" {
   const secret = process.env.CRON_SECRET?.trim() ?? "";
@@ -91,13 +102,6 @@ async function checkWatch(watch: WatchRecord): Promise<{ alerts: AlertRecord[]; 
     last_checked_at: nowDate().toISOString(),
     baseline_complete: true
   });
-  if (created.length && watch.webhook_url) {
-    const text = webhookText(watch.label, created);
-    const posted = await postWebhook(watch.webhook_url, text);
-    if (posted !== "ok") {
-      console.error(JSON.stringify({ event: "webhook_failed", host: webhookHostLabel(watch.webhook_url), result: posted }));
-    }
-  }
   return { alerts: created, failed: false };
 }
 
@@ -110,10 +114,110 @@ function webhookText(label: string, alerts: AlertRecord[]): string {
   return [`Verhound: ${alerts.length} new advisories in ${label}`, ...lines, "Verhound has not changed your project."].join("\n");
 }
 
+function roomToSend(deadline: number): boolean {
+  return nowMs() + 1_000 < deadline;
+}
+
+/**
+ * Send alerts that are still pending. A claim is taken before the network call and released on failure,
+ * so a second run does not send a batch that already succeeded. Work that does not fit before `deadline`
+ * stays pending for the next run.
+ */
+async function deliverPending(baseUrl: string, deadline: number, attempted: Set<string>): Promise<void> {
+  await deliverWebhooks(deadline, attempted);
+  await deliverEmails(baseUrl, deadline, attempted);
+}
+
+async function deliverWebhooks(deadline: number, attempted: Set<string>): Promise<void> {
+  if (!roomToSend(deadline)) return;
+  const store = getStore();
+  const pending = (await store.listPendingAlerts("webhook", 50)).filter((alert) => !attempted.has(alert.id));
+  const byWatch = new Map<string, AlertRecord[]>();
+  for (const alert of pending) {
+    const list = byWatch.get(alert.watch_id) ?? [];
+    list.push(alert);
+    byWatch.set(alert.watch_id, list);
+  }
+  for (const [watchId, alerts] of byWatch) {
+    if (!roomToSend(deadline)) return;
+    const watch = await store.getWatchById(watchId);
+    const ids = alerts.map((alert) => alert.id);
+    if (!watch || webhookNeedsKey(watch)) {
+      if (watch && webhookNeedsKey(watch)) console.error(JSON.stringify({ event: "webhook_key_missing" }));
+      if (!watch) await store.markWebhooksSent(ids, nowDate().toISOString());
+      continue;
+    }
+    if (!watch.webhook_url) {
+      await store.markWebhooksSent(ids, nowDate().toISOString());
+      continue;
+    }
+    const at = nowDate().toISOString();
+    const staleBefore = new Date(nowMs() - CLAIM_STALE_MS).toISOString();
+    const claimed = await store.claimAlerts("webhook", ids, at, staleBefore);
+    if (!claimed.length) continue;
+    const batch = alerts.filter((alert) => claimed.includes(alert.id));
+    const posted = await postWebhook(watch.webhook_url, webhookText(watch.label, batch));
+    for (const id of claimed) attempted.add(id);
+    if (posted === "ok") {
+      await store.markWebhooksSent(claimed, nowDate().toISOString());
+    } else {
+      await store.releaseAlertClaims("webhook", claimed);
+      console.error(JSON.stringify({ event: "webhook_failed", host: webhookHostLabel(watch.webhook_url), result: posted }));
+    }
+  }
+}
+
+async function deliverEmails(baseUrl: string, deadline: number, attempted: Set<string>): Promise<void> {
+  if (!roomToSend(deadline) || !mailWillSend()) return;
+  const store = getStore();
+  const mailer = getMailer();
+  const pending = (await store.listPendingAlerts("email", 80)).filter((alert) => !attempted.has(alert.id));
+  const byAccount = new Map<string, AlertRecord[]>();
+  for (const alert of pending) {
+    const list = byAccount.get(alert.account_id) ?? [];
+    list.push(alert);
+    byAccount.set(alert.account_id, list);
+  }
+  const dayStart = new Date(nextEtMidnight().getTime() - 24 * 60 * 60 * 1000).toISOString();
+  for (const [accountId, alerts] of byAccount) {
+    if (!roomToSend(deadline)) return;
+    const account = await store.getAccount(accountId);
+    if (!account?.email) continue;
+    const ordered = [...alerts].sort((a, b) => Number(b.malicious) - Number(a.malicious));
+    const malware = ordered.filter((alert) => alert.malicious);
+    const rest = ordered.filter((alert) => !alert.malicious);
+    const already = await store.emailedOnDay(accountId, dayStart);
+    const batches = [malware, already ? [] : rest];
+    for (const batch of batches) {
+      if (!batch.length || !roomToSend(deadline)) continue;
+      const ids = batch.map((alert) => alert.id);
+      const at = nowDate().toISOString();
+      const staleBefore = new Date(nowMs() - CLAIM_STALE_MS).toISOString();
+      const claimed = await store.claimAlerts("email", ids, at, staleBefore);
+      if (!claimed.length) continue;
+      for (const id of claimed) attempted.add(id);
+      const sending = batch.filter((alert) => claimed.includes(alert.id));
+      try {
+        const result = await mailer.sendAlert(account.email, { alerts: sending.map(digestAlert), accountUrl: `${baseUrl}/account` });
+        if (result === "sent") await store.markEmailed(claimed, nowDate().toISOString());
+        else await store.releaseAlertClaims("email", claimed);
+      } catch (error) {
+        await store.releaseAlertClaims("email", claimed);
+        const name = error instanceof Error ? error.name : "Error";
+        console.error(JSON.stringify({ event: "alert_email_failed", name }));
+      }
+    }
+  }
+}
+
 export async function runWatchCron(baseUrl: string): Promise<{ checked: number; alerts: number; failed: number; remaining: number }> {
   const started = nowMs();
+  const deadline = started + budgetMs();
   const store = getStore();
   const olderThan = new Date(nowMs() - WATCH_STALE_MS).toISOString();
+  const attemptedSends = new Set<string>();
+  // Finish notifications the previous run did not reach before checking more projects.
+  await deliverPending(baseUrl, deadline, attemptedSends);
   const fresh: AlertRecord[] = [];
   let checked = 0;
   let failed = 0;
@@ -121,13 +225,13 @@ export async function runWatchCron(baseUrl: string): Promise<{ checked: number; 
   // at the front of the due list, so it is skipped (offset) instead of being re-checked in a loop.
   const attempted = new Set<string>();
   let offset = 0;
-  while (nowMs() - started < BUDGET_MS) {
+  while (nowMs() < deadline) {
     const due = await store.listDueWatches(CONCURRENCY * 2, offset, olderThan);
     if (!due.length) break;
     const todo = due.filter((watch) => !attempted.has(watch.id));
     offset += due.length - todo.length;
     if (!todo.length) continue;
-    for (let index = 0; index < todo.length && nowMs() - started < BUDGET_MS; index += CONCURRENCY) {
+    for (let index = 0; index < todo.length && nowMs() < deadline; index += CONCURRENCY) {
       const slice = todo.slice(index, index + CONCURRENCY);
       for (const watch of slice) attempted.add(watch.id);
       const results = await Promise.all(slice.map(async (watch) => {
@@ -149,37 +253,7 @@ export async function runWatchCron(baseUrl: string): Promise<{ checked: number; 
   if (remaining > 0) {
     console.error(JSON.stringify({ event: "watch_backlog", remaining, checked, failed }));
   }
-  const byAccount = new Map<string, AlertRecord[]>();
-  for (const alert of fresh) {
-    const list = byAccount.get(alert.account_id) ?? [];
-    list.push(alert);
-    byAccount.set(alert.account_id, list);
-  }
-  const dayStart = new Date(nextEtMidnight().getTime() - 24 * 60 * 60 * 1000).toISOString();
-  const mailer = getMailer();
-  for (const [accountId, alerts] of byAccount) {
-    const account = await store.getAccount(accountId);
-    const email = account?.email;
-    if (!email) continue;
-    const ordered = [...alerts].sort((a, b) => Number(b.malicious) - Number(a.malicious));
-    const malware = ordered.filter((alert) => alert.malicious);
-    const rest = ordered.filter((alert) => !alert.malicious);
-    const already = await store.emailedOnDay(accountId, dayStart);
-    const batches = [
-      malware,
-      already ? [] : rest
-    ];
-    for (const batch of batches) {
-      if (!batch.length) continue;
-      try {
-        await mailer.sendAlert(email, { alerts: batch.map(digestAlert), accountUrl: `${baseUrl}/account` });
-        await store.markEmailed(batch.map((alert) => alert.id), nowDate().toISOString());
-      } catch (error) {
-        const name = error instanceof Error ? error.name : "Error";
-        console.error(JSON.stringify({ event: "alert_email_failed", name }));
-      }
-    }
-  }
+  await deliverPending(baseUrl, deadline, attemptedSends);
   const purgeBefore = new Date(nowMs() - 7 * 24 * 60 * 60 * 1000).toISOString();
   await store.purgeExpiredCache(purgeBefore).catch(() => 0);
   logCronTiming(checked, fresh.length, nowMs() - started, Math.max(0, remaining), failed);

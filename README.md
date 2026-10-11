@@ -23,7 +23,7 @@ The assistant opens a browser page so you can approve the connection.
 ## Pricing
 
 <!-- price-allowed:start -->
-Pro is $7.99/month or $79.99/year. The trial is 7 days and includes 100 tool calls a day and 1 watched project. Pro includes 300 tool calls a day and up to 10 watched projects, plus advisory alerts. A card is collected only after billing is connected on that deployment.
+Pro is $7.99/month or $79.99/year. The 7-day Pro trial includes 100 tool calls a day and 1 watched project. Pro includes 300 tool calls a day and up to 10 watched projects, plus advisory alerts. Until billing is connected, the page calls this a 7-day Pro trial and does not collect a card.
 <!-- price-allowed:end -->
 
 Free plan: an account with a verified email gets 15 one-off checks a day (`check_packages`, `verify_package_exists`, `runtime_eol`, and `audit_manifest` up to 20 KB), with up to 10 packages per call. `watch_manifest`, `list_alerts`, and `plan_upgrade` are part of Pro and the Pro trial. Every account needs a verified email, and each person gets one Pro trial. When a trial ends without Pro, the account moves to the free plan.
@@ -71,10 +71,15 @@ Set these in the host. Do not commit secret values.
 | `RESEND_API_KEY` | Used only when mail is enabled |
 | `ALERT_FROM` | From address for alert mail |
 | `TRIAL_DAYS` | Optional override, integer 1 through 3650. Default 7 |
+| `WEBHOOK_ENC_KEY` | 32-byte key, standard base64, used to encrypt saved Slack and Discord webhook URLs. Required in production before a webhook can be saved or sent |
+| `STRIPE_SECRET_KEY` | Secret key for Checkout and the billing portal. Read only when billing is turned on |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret for `POST /billing/webhook` |
+| `STRIPE_PRICE_MONTHLY` | Price id for the monthly plan |
+| `STRIPE_PRICE_YEARLY` | Price id for the yearly plan |
 
-The Supabase project for this product is ref `frkulsspyctwntbrihty` in `us-east-1`. Set `SUPABASE_URL` to `https://frkulsspyctwntbrihty.supabase.co`. The service-role key stays in the host environment. Apply `supabase/migrations/001_init.sql` through `004_free_plan_and_webhooks.sql` in numeric order in the SQL editor at deploy time. This repository does not apply those files.
+`billingConfigured` is true only when `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_MONTHLY`, and `STRIPE_PRICE_YEARLY` are all set. Until then the trial copy is a 7-day Pro trial and checkout does not collect a card. This repository does not create Stripe products, prices, or customers.
 
-There is no billing secret in this version. `billingConfigured` stays false until checkout is connected.
+The Supabase project for this product is ref `frkulsspyctwntbrihty` in `us-east-1`. Set `SUPABASE_URL` to `https://frkulsspyctwntbrihty.supabase.co`. The service-role key stays in the host environment. Apply `supabase/migrations/001_init.sql` through `005_webhook_seal_and_billing.sql` in numeric order in the SQL editor at deploy time. This repository does not apply those files.
 
 ## Develop
 
