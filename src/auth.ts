@@ -324,7 +324,7 @@ export function installOAuth(app: Express): void {
     if (!csrf || csrf !== readCookie(req, CSRF_COOKIE)) {
       return res.status(400).type("html").send(page(PUBLIC_BRAND, "<h1>The connection form expired.</h1><p>Start the connection again.</p>", `${base}/logo.jpg`));
     }
-    if (fields.resource !== resourceUrl(base) || fields.code_challenge_method !== "S256") {
+    if (fields.resource !== resourceUrl(base) || fields.code_challenge_method !== "S256" || fields.code_challenge.length < 43 || fields.code_challenge.length > 128) {
       return res.redirect(redirectError(fields.redirect_uri, "invalid_request", fields.state));
     }
     const secure = base.startsWith("https://");
