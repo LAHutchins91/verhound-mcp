@@ -1,0 +1,15 @@
+{
+  "name": "verhound",
+  "displayName": "Verhound by Ouroboros",
+  "version": "1.0.0",
+  "description": "Dependency facts for coding agents: registry existence, versions, known advisories, and runtime end-of-life dates.",
+  "author": {
+    "name": "Ouroboros"
+  },
+  "homepage": "https://ouroborosapps.com",
+  "repository": "https://github.com/LAHutchins91/verhound-mcp",
+  "license": "MIT",
+  "keywords": ["dependencies", "advisories", "npm", "pypi", "mcp"],
+  "logo": "logo.jpg",
+  "publisher": "Ouroboros"
+}
