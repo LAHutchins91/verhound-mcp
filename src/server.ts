@@ -9,6 +9,7 @@ import { PRODUCT, publicBase, SERVICE, VERSION } from "./config.js";
 import { MCP_CORS_HEADERS, mcpBrowserOriginAllowed } from "./mcp-clients.js";
 import { mailConfigured } from "./mailer.js";
 import { installPages } from "./pages.js";
+import { configStatus, failClosed } from "./runtime-config.js";
 import { getStore, storageBackendName } from "./store.js";
 import { createVerhoundServer } from "./tools.js";
 import { upstreamHealth } from "./upstream/http.js";
@@ -49,8 +50,10 @@ app.get(["/logo.jpg", "/favicon.ico"], (_req, res) => {
 
 app.get("/health", (_req, res) => {
   const upstreams = upstreamHealth();
-  res.json({
-    ok: true,
+  const config = configStatus();
+  res.status(config === "missing_required_env" ? 503 : 200).json({
+    ok: config !== "missing_required_env",
+    config,
     service: SERVICE,
     name: PRODUCT,
     version: VERSION,
@@ -74,6 +77,16 @@ app.get("/.well-known/openai-apps-challenge", (_req, res) => {
 });
 
 installPages(app);
+app.use([
+  "/mcp",
+  "/register",
+  "/authorize",
+  "/token",
+  "/api/cron",
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/openid-configuration",
+  "/.well-known/oauth-protected-resource"
+], failClosed);
 installOAuth(app);
 installCron(app);
 

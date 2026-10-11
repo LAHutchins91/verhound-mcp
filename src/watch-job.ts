@@ -6,6 +6,7 @@ import { getMailer } from "./mailer.js";
 import { recordNewAlert } from "./operations.js";
 import { timingSafeEqualText } from "./reviewer.js";
 import { getStore, type AlertRecord, type WatchRecord } from "./store.js";
+import { cronBlocked } from "./runtime-config.js";
 import { logCronTiming } from "./timing.js";
 import { getVuln, queryBatch } from "./upstream/osv.js";
 import type { Ecosystem } from "./config.js";
@@ -128,6 +129,7 @@ export async function runWatchCron(baseUrl: string): Promise<{ checked: number; 
 }
 
 export async function executeCron(authorization: string | undefined, cronSecretHeader: string | undefined, baseUrl: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (cronBlocked()) return { status: 503, body: { ok: false, error: "This service is temporarily unavailable." } };
   const verdict = authorized(authorization, cronSecretHeader);
   if (verdict === "missing") return { status: 503, body: { ok: false, error: "Cron is not configured." } };
   if (verdict === "rejected") return { status: 401, body: { ok: false, error: "Cron credentials were rejected." } };
