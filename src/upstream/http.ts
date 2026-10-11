@@ -149,7 +149,8 @@ async function fetchAllowed(url: string, init: RequestInit, source: SourceName, 
     throw new UpstreamError("Refused a request to an unexpected host.", source);
   }
   const response = await doFetch(url, { ...init, redirect: "manual" });
-  if (response.status >= 300 && response.status < 400) {
+  // 304 Not Modified is a revalidation answer, not a redirect.
+  if (response.status >= 300 && response.status < 400 && response.status !== 304) {
     const location = response.headers.get("location");
     if (!location || redirects >= 3) throw new UpstreamError(missMessage(source), source, response.status);
     const next = new URL(location, url);
@@ -268,6 +269,8 @@ export async function cachedJson(options: {
         expires_at: new Date(nowMs() + options.ttlSeconds * 1000).toISOString()
       };
       await store.putCache(refreshed).catch(() => undefined);
+      // A 304 is still a request to the upstream, so it counts toward the monthly budget.
+      await recordRequest(options.source, Boolean(options.countNpm || options.source === "npm"));
       return fromCache(refreshed, false);
     }
 
