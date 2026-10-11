@@ -219,6 +219,16 @@ describe("trial copy and billing", () => {
     expect(privacy).toContain("advisory link");
   });
 
+  it("answers the Stripe webhook with a clear 503 while billing is not configured", async () => {
+    const response = await fetch(`${base}/billing/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": "t=1,v1=abc" },
+      body: JSON.stringify({ type: "checkout.session.completed" })
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ok: false, error: "Billing is not configured." });
+  });
+
   it("says card required and talks to Stripe only through the mocked API", async () => {
     process.env.STRIPE_SECRET_KEY = "sk_test_mock";
     process.env.STRIPE_WEBHOOK_SECRET = "whsec_mock";

@@ -163,7 +163,12 @@ export function installBilling(app: Express): void {
   app.post("/billing/webhook", async (req, res) => {
     const raw = rawBodies.get(req);
     const config = billingConfig();
-    if (!raw || !config) {
+    if (!config) {
+      // Not a failure of the request: billing is switched off on this deployment.
+      res.status(503).json({ ok: false, error: "Billing is not configured." });
+      return;
+    }
+    if (!raw) {
       res.status(400).json({ ok: false });
       return;
     }
