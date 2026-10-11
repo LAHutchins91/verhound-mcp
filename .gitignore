@@ -2,10 +2,11 @@ node_modules
 dist
 .env
 .env.*
-data
+/data
 .netlify
 .vercel
 *.log
 uploads
 agent-tools
 coverage
+public
