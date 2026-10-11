@@ -303,6 +303,9 @@ describe("trial copy and billing", () => {
     expect(first.get("line_items[0][price]")).toBe("price_monthly_mock");
     expect(first.get("subscription_data[trial_period_days]")).toBe("7");
     expect(first.get("client_reference_id")).toBe(ACCOUNT);
+    expect(first.get("metadata[app]")).toBe("verhound");
+    expect(first.get("subscription_data[metadata][app]")).toBe("verhound");
+    expect(first.get("subscription_data[metadata][account_id]")).toBe(ACCOUNT);
     expect(stripeCalls[0]?.url).toBe("https://api.stripe.com/v1/checkout/sessions");
     await memoryStoreForTests().claimTrial(trialKey("pay@example.com"), ACCOUNT, new Date().toISOString());
     const again = await fetch(`${base}/billing/checkout`, {
@@ -322,6 +325,7 @@ describe("trial copy and billing", () => {
       data: {
         object: {
           client_reference_id: ACCOUNT,
+          metadata: { app: "verhound", account_id: ACCOUNT },
           customer: "cus_test123",
           customer_email: "pay@example.com",
           status: "complete",
@@ -340,7 +344,7 @@ describe("trial copy and billing", () => {
 
     const canceled = JSON.stringify({
       type: "customer.subscription.deleted",
-      data: { object: { status: "canceled", customer: "cus_test123", metadata: { account_id: ACCOUNT } } }
+      data: { object: { status: "canceled", customer: "cus_test123", items: { data: [{ price: { id: "price_monthly_mock" } }] }, metadata: { app: "verhound", account_id: ACCOUNT } } }
     });
     const dropped = await fetch(`${base}/billing/webhook`, {
       method: "POST",

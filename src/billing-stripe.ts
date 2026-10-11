@@ -9,6 +9,8 @@ import { getStore } from "./store.js";
 import { trialKey } from "./trial.js";
 
 const PAGE_CSRF = "verhound_page";
+/** Stamped on every Verhound checkout and subscription. The Stripe account is shared with other apps. */
+export const VERHOUND_APP = "verhound";
 const TOLERANCE_SEC = 300;
 const rawBodies = new WeakMap<Request, Buffer>();
 
@@ -80,7 +82,7 @@ async function stripeForm(path: string, fields: Record<string, string>, secretKe
   return body as Record<string, unknown>;
 }
 
-export async function createCheckoutSession(input: { accountId: string; email: string | null; interval: "monthly" | "yearly"; origin: string }): Promise<string> {
+export async function createCheckoutSession(input: { accountId: string; email: string | null; customerId?: string | null; interval: "monthly" | "yearly"; origin: string }): Promise<string> {
   const config = billingConfig();
   if (!config) throw new Error("Billing is not configured.");
   const trialDays = await stripeTrialDays(input.email);
@@ -91,10 +93,14 @@ export async function createCheckoutSession(input: { accountId: string; email: s
     success_url: `${input.origin}/account?billing=return`,
     cancel_url: `${input.origin}/checkout?billing=cancel`,
     client_reference_id: input.accountId,
+    "metadata[app]": VERHOUND_APP,
     "metadata[account_id]": input.accountId,
+    "subscription_data[metadata][app]": VERHOUND_APP,
     "subscription_data[metadata][account_id]": input.accountId
   };
-  if (input.email) fields.customer_email = input.email;
+  // Reuse our own customer so later subscription events match the customer stored for this account.
+  if (input.customerId) fields.customer = input.customerId;
+  else if (input.email) fields.customer_email = input.email;
   if (trialDays) fields["subscription_data[trial_period_days]"] = String(trialDays);
   const payload = await stripeForm("/v1/checkout/sessions", fields, config.secretKey);
   const url = textField(payload.url);
@@ -114,40 +120,74 @@ export async function createPortalSession(customerId: string, origin: string): P
   return url;
 }
 
-export async function applyStripeEvent(event: unknown): Promise<void> {
-  if (!event || typeof event !== "object") return;
+/** Every price on a subscription, from items.data[].price (string or object). */
+export function subscriptionPriceIds(record: Record<string, unknown>): string[] {
+  const items = record.items && typeof record.items === "object" ? record.items as { data?: unknown } : {};
+  const data = Array.isArray(items.data) ? items.data : [];
+  return data.map((item) => {
+    const price = item && typeof item === "object" ? (item as { price?: unknown }).price : undefined;
+    if (typeof price === "string") return price;
+    if (price && typeof price === "object" && typeof (price as { id?: unknown }).id === "string") return (price as { id: string }).id;
+    return "";
+  });
+}
+
+/**
+ * Apply one verified Stripe event. Every app on the shared Stripe account gets every event,
+ * so anything that is not provably Verhound's is ignored before any read or write:
+ * - checkout.session.completed needs metadata.app=verhound, a matching account id in
+ *   client_reference_id and metadata.account_id, and an account that already exists here.
+ * - customer.subscription.* needs every item price to be STRIPE_PRICE_MONTHLY/YEARLY,
+ *   metadata.app=verhound or the customer we stored, an existing account, and no conflicting stored customer.
+ * A bare user id in metadata or client_reference_id is never enough on its own.
+ */
+export async function applyStripeEvent(event: unknown): Promise<"applied" | "ignored"> {
+  const config = billingConfig();
+  if (!config || !event || typeof event !== "object") return "ignored";
   const type = textField((event as { type?: unknown }).type);
   const object = (event as { data?: { object?: unknown } }).data?.object;
-  if (!type || !object || typeof object !== "object") return;
+  if (!type || !object || typeof object !== "object") return "ignored";
   const record = object as Record<string, unknown>;
   const metadata = record.metadata && typeof record.metadata === "object" ? record.metadata as Record<string, unknown> : {};
+  const ours = metadata.app === VERHOUND_APP;
   const store = getStore();
   if (type === "checkout.session.completed") {
-    const accountId = accountIdOf(record.client_reference_id) ?? accountIdOf(metadata.account_id);
-    if (!accountId) return;
-    await store.ensureAccount(accountId);
+    if (!ours) return "ignored";
+    const fromRef = accountIdOf(record.client_reference_id);
+    const fromMeta = accountIdOf(metadata.account_id);
+    if (!fromRef || !fromMeta || fromRef !== fromMeta) return "ignored";
+    const account = await store.getAccount(fromRef);
+    if (!account) return "ignored";
     const customer = customerIdOf(record.customer);
-    if (customer) await store.setStripeCustomer(accountId, customer);
+    if (customer) await store.setStripeCustomer(fromRef, customer);
     const status = textField(record.status);
     const payment = textField(record.payment_status);
     if (status === "complete" || payment === "paid" || payment === "no_payment_required") {
-      await store.setPlan(accountId, "pro");
+      await store.setPlan(fromRef, "pro");
     }
-    const account = await store.getAccount(accountId);
     const details = record.customer_details && typeof record.customer_details === "object" ? record.customer_details as Record<string, unknown> : {};
-    const email = textField(record.customer_email) ?? textField(details.email) ?? account?.email ?? null;
-    if (email) await store.claimTrial(trialKey(email), accountId, nowDate().toISOString());
-    return;
+    const email = textField(record.customer_email) ?? textField(details.email) ?? account.email ?? null;
+    if (email) await store.claimTrial(trialKey(email), fromRef, nowDate().toISOString());
+    return "applied";
   }
   if (type === "customer.subscription.created" || type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
+    const prices = subscriptionPriceIds(record);
+    const allowed = [config.monthlyPrice, config.yearlyPrice];
+    if (!prices.length || !prices.every((price) => allowed.includes(price))) return "ignored";
     const accountId = accountIdOf(metadata.account_id);
     const status = textField(record.status);
-    if (!accountId || !status) return;
-    await store.ensureAccount(accountId);
-    await store.setPlan(accountId, planForSubscriptionStatus(status));
+    if (!accountId || !status) return "ignored";
+    const account = await store.getAccount(accountId);
+    if (!account) return "ignored";
     const customer = customerIdOf(record.customer);
-    if (customer) await store.setStripeCustomer(accountId, customer);
+    const stored = account.stripe_customer_id ?? null;
+    if (stored && customer !== stored) return "ignored";
+    if (!ours && !(stored && customer === stored)) return "ignored";
+    await store.setPlan(accountId, planForSubscriptionStatus(status));
+    if (customer && !stored) await store.setStripeCustomer(accountId, customer);
+    return "applied";
   }
+  return "ignored";
 }
 
 function csrfOk(req: Request): boolean {
@@ -209,7 +249,7 @@ export function installBilling(app: Express): void {
     }
     const account = await getStore().getAccount(accountId);
     try {
-      const url = await createCheckoutSession({ accountId, email: account?.email ?? null, interval, origin: base });
+      const url = await createCheckoutSession({ accountId, email: account?.email ?? null, customerId: account?.stripe_customer_id ?? null, interval, origin: base });
       res.redirect(303, url);
     } catch (error) {
       const name = error instanceof Error ? error.name : "Error";
