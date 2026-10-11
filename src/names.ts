@@ -64,6 +64,8 @@ export function similarPopular(ecosystem: Ecosystem, name: string, limit: number
   const list = POPULAR[ecosystem] ?? [];
   const key = compareKey(ecosystem, name);
   if (key.length < 4) return [];
+  // A name that is itself on the popular list is not flagged as a look-alike of another one.
+  if (list.some((candidate) => compareKey(ecosystem, candidate) === key)) return [];
   const hits: { name: string; distance: number }[] = [];
   for (const candidate of list) {
     const other = compareKey(ecosystem, candidate);
