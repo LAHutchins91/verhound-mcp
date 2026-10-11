@@ -36,7 +36,11 @@ export function slackEscape(text: string): string {
  * POST an alert text. Redirects are refused and not followed.
  * The URL is not written to logs.
  */
-export async function postWebhook(raw: string, text: string): Promise<"ok" | "rejected" | "failed"> {
+/**
+ * "gone" means Slack or Discord says the webhook no longer exists or the token is wrong
+ * (401, 403, 404, 410). Retrying will not help, so the caller stops retrying.
+ */
+export async function postWebhook(raw: string, text: string): Promise<"ok" | "rejected" | "gone" | "failed"> {
   const kind = webhookKind(raw);
   if (!kind) return "rejected";
   // Package names such as @everyone/x must not ping a Discord server, and Slack control
@@ -57,6 +61,7 @@ export async function postWebhook(raw: string, text: string): Promise<"ok" | "re
     return "failed";
   }
   if (response.status >= 300 && response.status < 400) return "rejected";
+  if ([401, 403, 404, 410].includes(response.status)) return "gone";
   if (!response.ok) return "failed";
   return "ok";
 }

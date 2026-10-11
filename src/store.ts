@@ -107,7 +107,8 @@ export interface DataStore {
   getWatchById(id: string): Promise<WatchRecord | null>;
   hasTrial(emailHash: string): Promise<boolean>;
   setStripeCustomer(id: string, customerId: string): Promise<void>;
-  listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]>;
+  /** Pending alerts detected after newerThanIso, oldest first. Older ones are no longer retried. */
+  listPendingAlerts(channel: AlertChannel, limit: number, newerThanIso: string): Promise<AlertRecord[]>;
   claimAlerts(channel: AlertChannel, ids: string[], at: string, staleBefore: string): Promise<string[]>;
   markWebhooksSent(ids: string[], at: string): Promise<void>;
   releaseAlertClaims(channel: AlertChannel, ids: string[]): Promise<void>;
@@ -410,8 +411,8 @@ class MemoryStore implements DataStore {
     account.stripe_customer_id = customerId;
   }
 
-  async listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]> {
-    return this.alerts.filter((alert) => pending(alert, channel)).sort((a, b) => a.detected_at.localeCompare(b.detected_at)).slice(0, limit);
+  async listPendingAlerts(channel: AlertChannel, limit: number, newerThanIso: string): Promise<AlertRecord[]> {
+    return this.alerts.filter((alert) => pending(alert, channel) && alert.detected_at > newerThanIso).sort((a, b) => a.detected_at.localeCompare(b.detected_at)).slice(0, limit);
   }
 
   async claimAlerts(channel: AlertChannel, ids: string[], at: string, staleBefore: string): Promise<string[]> {
@@ -821,9 +822,9 @@ class SupabaseStore implements DataStore {
     if (!response.ok) throw new Error("Could not save the billing customer.");
   }
 
-  async listPendingAlerts(channel: AlertChannel, limit: number): Promise<AlertRecord[]> {
+  async listPendingAlerts(channel: AlertChannel, limit: number, newerThanIso: string): Promise<AlertRecord[]> {
     const column = channel === "email" ? "emailed_at" : "webhook_sent_at";
-    const response = await sb(`alerts?${column}=is.null&order=detected_at.asc&limit=${limit}&select=*`, { method: "GET" });
+    const response = await sb(`alerts?${column}=is.null&detected_at=gt.${encodeURIComponent(newerThanIso)}&order=detected_at.asc&limit=${limit}&select=*`, { method: "GET" });
     if (!response.ok) throw new Error("Could not list pending alerts.");
     return await response.json() as AlertRecord[];
   }

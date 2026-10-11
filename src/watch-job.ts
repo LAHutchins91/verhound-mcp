@@ -22,6 +22,12 @@ const BUDGET_MS = 20_000;
 const CONCURRENCY = 4;
 const RETRY_MS = 60 * 60 * 1000;
 const CLAIM_STALE_MS = 15 * 60 * 1000;
+/** Alerts still unsent after this long are not retried, so they cannot crowd out newer ones. */
+const PENDING_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+
+function pendingSince(): string {
+  return new Date(nowMs() - PENDING_MAX_AGE_MS).toISOString();
+}
 let budgetOverride: number | null = null;
 
 export function setWatchBudgetForTests(ms: number | null): void {
@@ -131,7 +137,7 @@ async function deliverPending(baseUrl: string, deadline: number, attempted: Set<
 async function deliverWebhooks(deadline: number, attempted: Set<string>): Promise<void> {
   if (!roomToSend(deadline)) return;
   const store = getStore();
-  const pending = (await store.listPendingAlerts("webhook", 50)).filter((alert) => !attempted.has(alert.id));
+  const pending = (await store.listPendingAlerts("webhook", 50, pendingSince())).filter((alert) => !attempted.has(alert.id));
   const byWatch = new Map<string, AlertRecord[]>();
   for (const alert of pending) {
     const list = byWatch.get(alert.watch_id) ?? [];
@@ -160,6 +166,11 @@ async function deliverWebhooks(deadline: number, attempted: Set<string>): Promis
     for (const id of claimed) attempted.add(id);
     if (posted === "ok") {
       await store.markWebhooksSent(claimed, nowDate().toISOString());
+    } else if (posted === "gone" || posted === "rejected") {
+      // A deleted webhook or a refused redirect will not start working on retry. Stop retrying
+      // so these alerts do not hold the front of the queue for other projects.
+      await store.markWebhooksSent(claimed, nowDate().toISOString());
+      console.error(JSON.stringify({ event: "webhook_gone", host: webhookHostLabel(watch.webhook_url), result: posted }));
     } else {
       await store.releaseAlertClaims("webhook", claimed);
       console.error(JSON.stringify({ event: "webhook_failed", host: webhookHostLabel(watch.webhook_url), result: posted }));
@@ -171,7 +182,7 @@ async function deliverEmails(baseUrl: string, deadline: number, attempted: Set<s
   if (!roomToSend(deadline) || !mailWillSend()) return;
   const store = getStore();
   const mailer = getMailer();
-  const pending = (await store.listPendingAlerts("email", 80)).filter((alert) => !attempted.has(alert.id));
+  const pending = (await store.listPendingAlerts("email", 80, pendingSince())).filter((alert) => !attempted.has(alert.id));
   const byAccount = new Map<string, AlertRecord[]>();
   for (const alert of pending) {
     const list = byAccount.get(alert.account_id) ?? [];

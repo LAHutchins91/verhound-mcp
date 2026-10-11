@@ -168,6 +168,39 @@ describe("pending notifications", () => {
     expect(calls.filter((url) => url.startsWith("https://hooks.slack.com"))).toHaveLength(1);
   });
 
+  it("stops retrying a deleted webhook and skips alerts pending for more than 72 hours", async () => {
+    const saved = await watchRow(SLACK);
+    const alert = (id: string) => ({
+      watch_id: saved.id,
+      account_id: ACCOUNT,
+      advisory_id: id,
+      package: "left-pad",
+      version: "1.2.3",
+      severity: "high",
+      first_fixed_version: null,
+      url: `https://osv.dev/vulnerability/${id}`,
+      malicious: false
+    });
+    await recordNewAlert(saved, alert("GHSA-gone-gone-gone"));
+    const calls: string[] = [];
+    setFetchForTests(async (url) => {
+      calls.push(String(url));
+      return new Response("no_service", { status: 404 });
+    });
+    process.env.CRON_SECRET = "cron-test-secret";
+    await executeCron("Bearer cron-test-secret", undefined, base);
+    expect(calls.filter((url) => url.startsWith("https://hooks.slack.com"))).toHaveLength(1);
+    expect(memoryStoreForTests().alerts[0]?.webhook_sent_at).toBeTruthy();
+    await executeCron("Bearer cron-test-secret", undefined, base);
+    expect(calls.filter((url) => url.startsWith("https://hooks.slack.com"))).toHaveLength(1);
+
+    await recordNewAlert(saved, alert("GHSA-old0-old0-old0"));
+    const old = memoryStoreForTests().alerts.find((row) => row.advisory_id === "GHSA-old0-old0-old0");
+    if (old) old.detected_at = new Date(Date.now() - 73 * 60 * 60 * 1000).toISOString();
+    await executeCron("Bearer cron-test-secret", undefined, base);
+    expect(calls.filter((url) => url.startsWith("https://hooks.slack.com"))).toHaveLength(1);
+  });
+
   it("retries an alert email that failed and does not send the same alert twice", async () => {
     const saved = await watchRow(null);
     await recordNewAlert(saved, {
