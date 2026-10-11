@@ -145,7 +145,7 @@ function etLocalToUtc(year: number, month: number, day: number): Date {
 
 export function capMessage(date = nowDate()): string {
   const reset = nextEtMidnight(date).toISOString();
-  return `Daily limit reached. It resets at ${reset} (US Eastern). Pro raises limits.`;
+  return `Daily limit reached. It resets at midnight US Eastern (${reset}). Pro raises limits.`;
 }
 
 export function proUpsell(): string {
