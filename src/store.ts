@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { nowDate } from "./clock.js";
+import { nowDate, nowMs } from "./clock.js";
 import type { Plan } from "./config.js";
 
 export interface Account {
@@ -91,6 +91,11 @@ export interface DataStore {
   listAlerts(accountId: string, opts: { label?: string; since?: string; limit: number }): Promise<AlertRecord[]>;
   markEmailed(ids: string[], at: string): Promise<void>;
   emailedOnDay(accountId: string, dayStartIso: string): Promise<boolean>;
+  /** Record that a normalized email used a trial. Returns the first time it was used. Survives account deletion. */
+  claimTrial(emailHash: string, accountId: string, atIso: string): Promise<string>;
+  setTrialStart(id: string, startedIso: string): Promise<void>;
+  /** One-time use for OAuth codes and refresh tokens. fresh=false means it was used before, at usedAt. */
+  claimOnce(kind: "code" | "refresh", jti: string, expiresAtIso: string, atIso: string): Promise<{ fresh: boolean; usedAt: string | null }>;
 }
 
 const locks = new Map<string, Promise<unknown>>();
@@ -115,6 +120,29 @@ class MemoryStore implements DataStore {
   watches = new Map<string, WatchRecord>();
   seen = new Set<string>();
   alerts: AlertRecord[] = [];
+  trialMarkers = new Map<string, { account_id: string; first_used_at: string }>();
+  used = new Map<string, { used_at: string; expires_at: string }>();
+
+  async claimTrial(emailHash: string, accountId: string, atIso: string): Promise<string> {
+    const existing = this.trialMarkers.get(emailHash);
+    if (existing) return existing.first_used_at;
+    this.trialMarkers.set(emailHash, { account_id: accountId, first_used_at: atIso });
+    return atIso;
+  }
+
+  async setTrialStart(id: string, startedIso: string): Promise<void> {
+    const account = this.accounts.get(id);
+    if (account) account.trial_started_at = startedIso;
+  }
+
+  async claimOnce(kind: "code" | "refresh", jti: string, expiresAtIso: string, atIso: string): Promise<{ fresh: boolean; usedAt: string | null }> {
+    const key = `${kind}:${jti}`;
+    for (const [name, row] of this.used) if (row.expires_at < atIso) this.used.delete(name);
+    const existing = this.used.get(key);
+    if (existing) return { fresh: false, usedAt: existing.used_at };
+    this.used.set(key, { used_at: atIso, expires_at: expiresAtIso });
+    return { fresh: true, usedAt: null };
+  }
 
   async ensureAccount(id: string, email?: string | null, plan?: Plan): Promise<Account> {
     const existing = this.accounts.get(id);
@@ -330,8 +358,68 @@ async function sb(path: string, init: RequestInit & { prefer?: string } = {}): P
   return fetch(`${url}/rest/v1/${path}`, { ...init, headers });
 }
 
+const ACCOUNT_CACHE_TTL_MS = 30_000;
+const ACCOUNT_CACHE_MAX = 5_000;
+
 class SupabaseStore implements DataStore {
   backend = "supabase" as const;
+  /** Short per-instance cache so each MCP call does not read the account twice. */
+  private accountCache = new Map<string, { account: Account; until: number }>();
+
+  private cacheAccount(account: Account): Account {
+    if (this.accountCache.size >= ACCOUNT_CACHE_MAX) {
+      const first = this.accountCache.keys().next().value;
+      if (first) this.accountCache.delete(first);
+    }
+    this.accountCache.set(account.id, { account, until: nowMs() + ACCOUNT_CACHE_TTL_MS });
+    return account;
+  }
+
+  private forget(id: string): void {
+    this.accountCache.delete(id);
+  }
+
+  async claimTrial(emailHash: string, accountId: string, atIso: string): Promise<string> {
+    const response = await sb("trial_markers?on_conflict=email_hash", {
+      method: "POST",
+      prefer: "resolution=ignore-duplicates,return=representation",
+      body: JSON.stringify({ email_hash: emailHash, account_id: accountId, first_used_at: atIso })
+    });
+    if (!response.ok) throw new Error("Could not record the trial.");
+    const rows = await response.json() as { first_used_at: string }[];
+    if (rows[0]?.first_used_at) return rows[0].first_used_at;
+    const existing = await sb(`trial_markers?email_hash=eq.${encodeURIComponent(emailHash)}&select=first_used_at`, { method: "GET" });
+    if (!existing.ok) throw new Error("Could not read the trial.");
+    const found = await existing.json() as { first_used_at: string }[];
+    if (!found[0]?.first_used_at) throw new Error("Could not read the trial.");
+    return found[0].first_used_at;
+  }
+
+  async setTrialStart(id: string, startedIso: string): Promise<void> {
+    this.forget(id);
+    const response = await sb(`accounts?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      prefer: "return=minimal",
+      body: JSON.stringify({ trial_started_at: startedIso })
+    });
+    if (!response.ok) throw new Error("Could not update the trial.");
+  }
+
+  async claimOnce(kind: "code" | "refresh", jti: string, expiresAtIso: string, atIso: string): Promise<{ fresh: boolean; usedAt: string | null }> {
+    const key = `${kind}:${jti}`;
+    const response = await sb("oauth_used_tokens?on_conflict=jti", {
+      method: "POST",
+      prefer: "resolution=ignore-duplicates,return=representation",
+      body: JSON.stringify({ jti: key, kind, used_at: atIso, expires_at: expiresAtIso })
+    });
+    if (!response.ok) throw new Error("Could not record token use.");
+    const rows = await response.json() as unknown[];
+    if (rows.length) return { fresh: true, usedAt: null };
+    const existing = await sb(`oauth_used_tokens?jti=eq.${encodeURIComponent(key)}&select=used_at`, { method: "GET" });
+    if (!existing.ok) throw new Error("Could not read token use.");
+    const found = await existing.json() as { used_at: string }[];
+    return { fresh: false, usedAt: found[0]?.used_at ?? null };
+  }
 
   async ensureAccount(id: string, email?: string | null, plan?: Plan): Promise<Account> {
     const existing = await this.getAccount(id);
@@ -342,7 +430,8 @@ class SupabaseStore implements DataStore {
       const response = await sb("accounts?on_conflict=id", { method: "POST", prefer: "resolution=ignore-duplicates,return=representation", body: JSON.stringify(created) });
       if (!response.ok) throw new Error("Could not save the account.");
       const rows = await response.json() as Account[];
-      if (rows[0]) return rows[0];
+      if (rows[0]) return this.cacheAccount(rows[0]);
+      this.forget(id);
       return (await this.getAccount(id)) ?? created;
     }
     if ((email && email !== existing.email) || (plan === "pro" && existing.plan !== "pro")) {
@@ -350,22 +439,26 @@ class SupabaseStore implements DataStore {
       if (email && !existing.email) patch.email = email;
       if (plan === "pro") patch.plan = "pro";
       if (Object.keys(patch).length) {
+        this.forget(id);
         await sb(`accounts?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify(patch) });
-        return { ...existing, ...patch };
+        return this.cacheAccount({ ...existing, ...patch });
       }
     }
     return existing;
   }
 
   async getAccount(id: string): Promise<Account | null> {
+    const hit = this.accountCache.get(id);
+    if (hit && hit.until > nowMs()) return hit.account;
     const response = await sb(`accounts?id=eq.${encodeURIComponent(id)}&select=*`, { method: "GET" });
     if (!response.ok) throw new Error("Could not read the account.");
     const rows = await response.json() as Account[];
-    return rows[0] ?? null;
+    return rows[0] ? this.cacheAccount(rows[0]) : null;
   }
 
   async setPlan(id: string, plan: Plan): Promise<void> {
     await this.ensureAccount(id);
+    this.forget(id);
     const response = await sb(`accounts?id=eq.${encodeURIComponent(id)}`, {
       method: "PATCH",
       prefer: "return=minimal",
@@ -375,6 +468,7 @@ class SupabaseStore implements DataStore {
   }
 
   async deleteAccount(id: string): Promise<void> {
+    this.forget(id);
     const encoded = encodeURIComponent(id);
     await sb(`alerts?account_id=eq.${encoded}`, { method: "DELETE", prefer: "return=minimal" });
     await sb(`watches?account_id=eq.${encoded}`, { method: "DELETE", prefer: "return=minimal" });
@@ -424,6 +518,7 @@ class SupabaseStore implements DataStore {
   }
 
   async purgeExpiredCache(beforeIso: string): Promise<number> {
+    await sb(`oauth_used_tokens?expires_at=lt.${encodeURIComponent(nowDate().toISOString())}`, { method: "DELETE", prefer: "return=minimal" }).catch(() => undefined);
     const response = await sb("rpc/purge_expired_cache", { method: "POST", body: JSON.stringify({ p_before: beforeIso }) });
     if (!response.ok) return 0;
     const body = await response.json() as number;

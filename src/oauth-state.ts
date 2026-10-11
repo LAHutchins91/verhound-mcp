@@ -1,44 +1,28 @@
-import { nowMs } from "./clock.js";
+import { nowDate, nowMs } from "./clock.js";
 import { REFRESH_REUSE_GRACE_MS } from "./config.js";
+import { getStore } from "./store.js";
 
-const usedCodes = new Map<string, number>();
-
-interface RefreshUse {
-  at: number;
-  tokens: Record<string, unknown> | null;
+/**
+ * One-time use for authorization codes and refresh tokens. With Supabase configured this is
+ * shared across instances (oauth_used_tokens); otherwise it lives in the in-memory store.
+ */
+export async function consumeAuthorizationCode(jti: string, expUnixSeconds: number): Promise<boolean> {
+  const claim = await getStore().claimOnce("code", jti, new Date(expUnixSeconds * 1000).toISOString(), nowDate().toISOString());
+  return claim.fresh;
 }
 
-const refreshUses = new Map<string, RefreshUse>();
-
-export function consumeAuthorizationCode(jti: string, expUnixSeconds: number): boolean {
-  const now = Math.floor(nowMs() / 1000);
-  for (const [id, exp] of usedCodes) {
-    if (exp < now) usedCodes.delete(id);
-  }
-  if (usedCodes.has(jti)) return false;
-  usedCodes.set(jti, expUnixSeconds);
-  return true;
+/**
+ * fresh: first use. grace: reused within the grace window (a client retry), so a new pair is issued.
+ * reused: reused after the grace window, rejected.
+ */
+export async function claimRefresh(jti: string, expUnixSeconds: number): Promise<"fresh" | "grace" | "reused"> {
+  const claim = await getStore().claimOnce("refresh", jti, new Date(expUnixSeconds * 1000).toISOString(), nowDate().toISOString());
+  if (claim.fresh) return "fresh";
+  if (claim.usedAt && nowMs() - Date.parse(claim.usedAt) <= REFRESH_REUSE_GRACE_MS) return "grace";
+  return "reused";
 }
 
-export function reuseRefresh(jti: string): { fresh: boolean; tokens?: Record<string, unknown> } {
-  const now = nowMs();
-  for (const [id, entry] of refreshUses) {
-    if (entry.tokens && now - entry.at > REFRESH_REUSE_GRACE_MS) {
-      refreshUses.set(id, { at: entry.at, tokens: null });
-    }
-    if (now - entry.at > 30 * 24 * 60 * 60 * 1000) refreshUses.delete(id);
-  }
-  const existing = refreshUses.get(jti);
-  if (!existing) return { fresh: true };
-  if (existing.tokens && now - existing.at <= REFRESH_REUSE_GRACE_MS) return { fresh: false, tokens: existing.tokens };
-  return { fresh: false };
-}
-
-export function rememberRefresh(jti: string, tokens: Record<string, unknown>): void {
-  refreshUses.set(jti, { at: nowMs(), tokens });
-}
-
+/** Kept for tests; state now lives in the store, which resetStoreForTests clears. */
 export function resetOAuthStateForTests(): void {
-  usedCodes.clear();
-  refreshUses.clear();
+  // no process-local state
 }
