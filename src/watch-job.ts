@@ -22,9 +22,10 @@ function authorized(authorization: string | undefined, alt: string | undefined):
   return "ok";
 }
 
-function meetsSeverity(score: string | undefined, minimum: string): boolean {
-  if (!score) return true;
-  return severityRank(score) >= severityRank(minimum);
+function meetsSeverity(level: string | undefined, minimum: string): boolean {
+  // Unknown level: alert rather than hide it.
+  if (!level) return true;
+  return severityRank(level) >= severityRank(minimum);
 }
 
 async function checkWatch(watch: WatchRecord): Promise<AlertRecord[]> {
@@ -50,7 +51,7 @@ async function checkWatch(watch: WatchRecord): Promise<AlertRecord[]> {
       raw = null;
     }
     const advisory = raw ? advisoryFromOsv(raw) : null;
-    if (advisory && !meetsSeverity(advisory.severity?.score, watch.min_severity)) continue;
+    if (advisory && !meetsSeverity(advisory.severity?.level, watch.min_severity)) continue;
     for (let index = 0; index < watch.deps.length; index += 1) {
       const dep = watch.deps[index];
       if (!(batch.ids[index] ?? []).includes(id)) continue;
@@ -63,7 +64,7 @@ async function checkWatch(watch: WatchRecord): Promise<AlertRecord[]> {
         advisory_id: id,
         package: dep.name,
         version: dep.version,
-        severity: advisory?.severity?.score ?? null,
+        severity: advisory?.severity?.level ?? advisory?.severity?.score ?? null,
         first_fixed_version: advisory?.first_fixed_version ?? null,
         url: advisory?.url ?? `https://osv.dev/vulnerability/${id}`
       }));

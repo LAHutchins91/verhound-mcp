@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseManifest } from "../src/manifest/parse.js";
+import { advisoryFromOsv } from "../src/advisories.js";
 
 describe("manifest parsers", () => {
   it("reads package.json pins and ranges", () => {
@@ -49,5 +50,17 @@ describe("manifest parsers", () => {
       }
       return true;
     }), { numRuns: 40 });
+  });
+});
+
+describe("advisory severity level", () => {
+  it("uses the database level, not the CVSS vector, for the level", () => {
+    const advisory = advisoryFromOsv({
+      id: "GHSA-aaaa-bbbb-cccc",
+      severity: [{ type: "CVSS_V3", score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }],
+      database_specific: { severity: "MODERATE" }
+    });
+    expect(advisory?.severity?.score).toContain("CVSS:3.1");
+    expect(advisory?.severity?.level).toBe("moderate");
   });
 });

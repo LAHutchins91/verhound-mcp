@@ -192,7 +192,7 @@ export async function auditManifest(access: Access, input: { filename: string; c
   const advisories = findings.flatMap((finding) => finding.advisories);
   const bySeverity: Record<string, number> = {};
   for (const advisory of advisories) {
-    const key = (advisory.severity?.score ?? "unknown").toLowerCase();
+    const key = advisory.severity?.level ?? "unknown";
     bySeverity[key] = (bySeverity[key] ?? 0) + 1;
   }
   const notes = [

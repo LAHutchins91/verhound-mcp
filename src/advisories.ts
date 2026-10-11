@@ -5,7 +5,7 @@ export interface Advisory {
   id: string;
   aliases: string[];
   summary: string;
-  severity?: { type: string; score: string };
+  severity?: { type: string; score: string; level?: string };
   source_database: string;
   url: string;
   affected_range_text: string;
@@ -110,11 +110,13 @@ export function advisoryFromOsv(raw: unknown, version?: string): Advisory | null
   const aliases = Array.isArray(vuln.aliases) ? vuln.aliases.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => asDataText(item, 40)) : [];
   const cvss = (vuln.severity ?? []).find((item) => item.type && item.score);
   const dbSeverity = typeof vuln.database_specific?.severity === "string" ? vuln.database_specific.severity : "";
-  const severity = cvss?.type && cvss.score
+  const level = severityLevel(dbSeverity);
+  const severity: Advisory["severity"] = cvss?.type && cvss.score
     ? { type: asDataText(cvss.type, 40), score: asDataText(cvss.score, 80) }
     : dbSeverity
       ? { type: "OSV", score: asDataText(dbSeverity, 40) }
       : undefined;
+  if (severity && level) severity.level = level;
   const references = (vuln.references ?? []).filter((item) => typeof item.url === "string");
   const advisory: Advisory = {
     id,
@@ -128,6 +130,14 @@ export function advisoryFromOsv(raw: unknown, version?: string): Advisory | null
   const fixed = firstFixed(vuln, version);
   if (fixed) advisory.first_fixed_version = fixed;
   return advisory;
+}
+
+/** Named level from the source database (for example GHSA "MODERATE"). A CVSS vector is not a level. */
+export function severityLevel(value: string): string | undefined {
+  const key = value.trim().toLowerCase();
+  if (key === "critical" || key === "high" || key === "moderate" || key === "low") return key;
+  if (key === "medium") return "moderate";
+  return undefined;
 }
 
 export function severityRank(value: string | undefined): number {
