@@ -1,0 +1,23 @@
+{
+  "name": "io.github.LAHutchins91/verhound",
+  "title": "Verhound by Ouroboros",
+  "description": "Dependency facts for coding agents: registry existence, versions, known advisories, and runtime end-of-life dates.",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/LAHutchins91/verhound-mcp",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://verhound-mcp.vercel.app/logo.jpg",
+      "mimeType": "image/jpeg"
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://verhound-mcp.vercel.app/mcp"
+    }
+  ],
+  "websiteUrl": "https://ouroborosapps.com/docs/verhound"
+}

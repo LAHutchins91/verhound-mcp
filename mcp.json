@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "verhound": {
+      "url": "https://verhound-mcp.vercel.app/mcp"
+    }
+  }
+}

@@ -1,0 +1,873 @@
+[
+  {
+    "name": "check_packages",
+    "title": "Check packages",
+    "description": "Look up one or more packages and report the latest stable version, publish dates, whether the requested version is deprecated, its declared license, a verdict of no_known_issues, review, or avoid with reasons, and known advisory IDs from OSV.dev with the first fixed version. Known malware records are listed first. Facts come from deps.dev, the npm registry, PyPI, RubyGems, Packagist, and OSV.dev at the time shown. 'No known advisories' means none were found in OSV.dev. It is not a promise that no advisory exists. Versions published less than 72 hours ago are flagged. This tool does not install or change anything.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ecosystem": {
+                "type": "string",
+                "enum": [
+                  "npm",
+                  "pypi",
+                  "go",
+                  "maven",
+                  "cargo",
+                  "nuget",
+                  "rubygems",
+                  "composer"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 214
+              },
+              "version": {
+                "type": "string",
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "ecosystem",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "include_prerelease": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "packages"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "audit_manifest",
+    "title": "Audit manifest",
+    "description": "Read pasted manifest or lockfile text (package.json, package-lock.json, pnpm-lock.yaml, yarn.lock, requirements.txt, pyproject.toml, poetry.lock, go.mod, Cargo.lock, pom.xml, .csproj, packages.lock.json, Gemfile.lock, composer.lock) and list dependencies with known OSV.dev advisories, declared licenses, a verdict of no_known_issues, review, or avoid, and deprecated or end-of-life runtimes declared in the file. Known malware records are listed first. Optional license_allow and license_deny lists flag strong copyleft, a missing license, and names you allow or deny. The text is processed in memory and not stored. Results reflect OSV.dev at the time shown and are not a complete security review. Nothing is installed or changed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "include_dev": {
+          "type": "boolean"
+        },
+        "license_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 40
+        },
+        "license_deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 40
+        }
+      },
+      "required": [
+        "filename",
+        "content"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "verify_package_exists",
+    "title": "Verify package exists",
+    "description": "Check whether a package name is published in its registry (npm, PyPI, RubyGems, or Packagist; other ecosystems via deps.dev), with first-publish date, latest version, recent download count where the registry provides one, and similar popular names. Use it before adding a dependency an assistant suggested, to catch names that do not exist. Existing in the registry does not mean a package is maintained, or that it is the one you intended. Very new names, versions published less than 72 hours ago, rarely downloaded names, and look-alike names are flagged for a human to review.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "npm",
+            "pypi",
+            "go",
+            "maven",
+            "cargo",
+            "nuget",
+            "rubygems",
+            "composer"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 214
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 214
+          },
+          "maxItems": 100
+        },
+        "max_similar": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        }
+      },
+      "required": [
+        "ecosystem"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "plan_upgrade",
+    "title": "Plan upgrade",
+    "description": "Pro and the Pro trial. The free plan does not include upgrade plans. Compare a pinned package version with a newer version and describe the version jump, advisories that the newer version addresses, advisories that remain, engine and peer dependency changes, and commands for you to run after reviewing. When to_version is omitted, the plan picks the newest version with no known advisories instead of always using the latest. Release-notes links are included only after a check succeeds. Verhound does not install or upgrade anything.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ecosystem": {
+          "type": "string",
+          "enum": [
+            "npm",
+            "pypi",
+            "go",
+            "maven",
+            "cargo",
+            "nuget",
+            "rubygems",
+            "composer"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 214
+        },
+        "from_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "to_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "project_runtime": {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "python": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ecosystem",
+        "name",
+        "from_version"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "runtime_eol",
+    "title": "Runtime end of life",
+    "description": "Look up end-of-life dates and maintenance flags for a language runtime or product from endoflife.date. Returns dates and flags only. It does not change the runtime.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "product": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 30
+        }
+      },
+      "required": [
+        "product"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "watch_manifest",
+    "title": "Watch manifest",
+    "description": "Free plan does not include watched projects. Pro and the Pro trial: save a manifest so Verhound re-checks every watched project against OSV.dev and can email, or post to a Slack or Discord incoming webhook, when a new advisory affects a listed version. Known malware records are alerted even when they are below min_severity. A trial can save one watched project. Pro can save up to 10. Only call this when the user explicitly asks to watch a project. Saving the same label again replaces that watch. Verhound never installs or upgrades anything.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "min_severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "moderate",
+            "high",
+            "critical"
+          ]
+        },
+        "alert_email": {
+          "type": "string",
+          "const": "account"
+        },
+        "webhook_url": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "license_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 40
+        },
+        "license_deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 40
+        }
+      },
+      "required": [
+        "label",
+        "filename",
+        "content"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_alerts",
+    "title": "List alerts",
+    "description": "Free plan does not include alerts. Pro and the Pro trial: list your watched manifests and the advisory alerts raised for them, newest first. Known malware records are marked. A trial includes one watched project. Pro includes up to 10.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "since": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "unwatch_manifest",
+    "title": "Unwatch manifest",
+    "description": "Stop watching a manifest and delete its stored dependency list, alerts, and webhook. The free plan has no watched projects. A trial can delete its one watched project. Pro can delete any of its watched projects.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "data": {},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "attribution": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "url",
+              "attribution"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "checked_at": {
+          "type": "string"
+        },
+        "cache_age_seconds": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "checked_at",
+        "cache_age_seconds",
+        "notes",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+]
