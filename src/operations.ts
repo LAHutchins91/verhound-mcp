@@ -146,27 +146,36 @@ export async function auditManifest(access: Access, input: { filename: string; c
     : [];
   const findings = pinned.map((dep, index) => findingFrom(pinnedFacts[index], dep.version));
   const extraFacts: PackageFact[] = [];
-  for (const dep of ranges) {
-    const [meta] = await lookupPackages([{ ecosystem: dep.ecosystem, name: dep.name }]);
-    extraFacts.push(meta);
+  // Batch range lookups so a ranged package.json does not run one lookup at a time.
+  const rangeMeta = ranges.length
+    ? await lookupPackages(ranges.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name })))
+    : [];
+  extraFacts.push(...rangeMeta);
+  const pairRequests: { ecosystem: Ecosystem; name: string; version: string }[] = [];
+  const pairPlan: { dep: ParsedDep; meta: PackageFact; low: string; high: string; at: number }[] = [];
+  ranges.forEach((dep, index) => {
+    const meta = rangeMeta[index];
+    if (!meta) return;
     const matches = meta.version_list.filter((row) => satisfies(row.version, dep.spec));
-    if (matches.length >= 1) {
-      const low = matches[0].version;
-      const high = matches[matches.length - 1].version;
-      const pair = await lookupPackages([
-        { ecosystem: dep.ecosystem, name: dep.name, version: low },
-        { ecosystem: dep.ecosystem, name: dep.name, version: high }
-      ]);
-      extraFacts.push(...pair);
-      const advisories = [...pair[0].advisories, ...pair[1].advisories.filter((item) => !pair[0].advisories.some((other) => other.id === item.id))];
-      findings.push({
-        name: dep.name,
-        version: low === high ? low : `${low}..${high}`,
-        advisories,
-        deprecated: pair[0].deprecated || pair[1].deprecated,
-        latest_stable: meta.latest_stable ?? null
-      });
-    }
+    if (!matches.length) return;
+    const low = matches[0].version;
+    const high = matches[matches.length - 1].version;
+    pairPlan.push({ dep, meta, low, high, at: pairRequests.length });
+    pairRequests.push({ ecosystem: dep.ecosystem, name: dep.name, version: low });
+    pairRequests.push({ ecosystem: dep.ecosystem, name: dep.name, version: high });
+  });
+  const pairFacts = pairRequests.length ? await lookupPackages(pairRequests) : [];
+  extraFacts.push(...pairFacts);
+  for (const item of pairPlan) {
+    const pair = [pairFacts[item.at], pairFacts[item.at + 1]];
+    const advisories = [...pair[0].advisories, ...pair[1].advisories.filter((entry) => !pair[0].advisories.some((other) => other.id === entry.id))];
+    findings.push({
+      name: item.dep.name,
+      version: item.low === item.high ? item.low : `${item.low}..${item.high}`,
+      advisories,
+      deprecated: pair[0].deprecated || pair[1].deprecated,
+      latest_stable: item.meta.latest_stable ?? null
+    });
   }
   const runtime = [];
   for (const item of parsed.runtimes.slice(0, 5)) {
