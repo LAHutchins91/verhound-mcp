@@ -11,7 +11,14 @@ import { logCronTiming } from "./timing.js";
 import { getVuln, queryBatch } from "./upstream/osv.js";
 import { postWebhook, webhookHostLabel } from "./webhooks.js";
 
+/**
+ * Time for watch checks in one run. The function limit is 30s; the rest is for email and cache purge.
+ * Coverage: about 4 watches every 1-2s, so one hourly run checks roughly 40-80 watches, and each watch
+ * is due again after WATCH_STALE_MS (20h). Every watch is rechecked within 20h while the total stays
+ * under about 20 runs x 40 = 800 watches. Past that, watch_backlog is logged with the remaining count.
+ */
 const BUDGET_MS = 20_000;
+const CONCURRENCY = 4;
 const RETRY_MS = 60 * 60 * 1000;
 
 function authorized(authorization: string | undefined, alt: string | undefined): "ok" | "missing" | "rejected" {
@@ -110,19 +117,33 @@ export async function runWatchCron(baseUrl: string): Promise<{ checked: number; 
   const fresh: AlertRecord[] = [];
   let checked = 0;
   let failed = 0;
+  // Watches run CONCURRENCY at a time. A watch whose timestamp could not be saved shows up again
+  // at the front of the due list, so it is skipped (offset) instead of being re-checked in a loop.
+  const attempted = new Set<string>();
+  let offset = 0;
   while (nowMs() - started < BUDGET_MS) {
-    const due = await store.listDueWatches(4, 0, olderThan);
+    const due = await store.listDueWatches(CONCURRENCY * 2, offset, olderThan);
     if (!due.length) break;
-    let progressed = false;
-    for (const watch of due) {
-      if (nowMs() - started >= BUDGET_MS) break;
-      const result = await checkWatch(watch);
-      fresh.push(...result.alerts);
-      if (result.failed) failed += 1;
-      checked += 1;
-      progressed = true;
+    const todo = due.filter((watch) => !attempted.has(watch.id));
+    offset += due.length - todo.length;
+    if (!todo.length) continue;
+    for (let index = 0; index < todo.length && nowMs() - started < BUDGET_MS; index += CONCURRENCY) {
+      const slice = todo.slice(index, index + CONCURRENCY);
+      for (const watch of slice) attempted.add(watch.id);
+      const results = await Promise.all(slice.map(async (watch) => {
+        try {
+          return await checkWatch(watch);
+        } catch (error) {
+          console.error(JSON.stringify({ event: "watch_check_error", name: error instanceof Error ? error.name : "Error" }));
+          return { alerts: [] as AlertRecord[], failed: true };
+        }
+      }));
+      for (const result of results) {
+        fresh.push(...result.alerts);
+        if (result.failed) failed += 1;
+        checked += 1;
+      }
     }
-    if (!progressed) break;
   }
   const remaining = await store.countDueWatches(olderThan).catch(() => -1);
   if (remaining > 0) {

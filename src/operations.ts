@@ -6,7 +6,7 @@ import { envelope, toolError, toolResult } from "./envelope.js";
 import { assessLicenses, type LicensePolicy } from "./license.js";
 import { parseManifest, type ParsedDep } from "./manifest/parse.js";
 import { lookupPackages, type PackageFact } from "./lookup.js";
-import { similarPopular } from "./names.js";
+import { similarPopular, validPackageName } from "./names.js";
 import { verifiedReleaseNotes } from "./release-notes.js";
 import { runtimeEol } from "./runtime.js";
 import { cmpVersion, isPrerelease, jump, satisfies } from "./semver.js";
@@ -173,11 +173,16 @@ function findingFrom(fact: PackageFact, version: string | undefined, policy?: Li
 export async function auditManifest(access: Access, input: { filename: string; content: string; includeDev?: boolean; licenseAllow?: string[]; licenseDeny?: string[] }): Promise<ToolPayload> {
   const limits = limitsFor(access.plan);
   const bytes = Buffer.byteLength(input.content);
+  // Check the size before parsing so an oversized input never reaches the parsers.
+  if (bytes > limits.manifestBytes) {
+    if (access.emailRequired) return toolError(verifyEmailMessage());
+    return toolError(overPlanLimitMessage());
+  }
   const parsed = parseManifest(input.filename, input.content, Boolean(input.includeDev));
   const depCount = parsed.dependencies.length;
   const blocked = await gate(access, "call", { bytes, packages: Math.min(depCount, limits.packagesPerCall) });
   if (blocked) return toolError(blocked);
-  if (bytes > limits.manifestBytes || depCount > limits.manifestDeps) return toolError(overPlanLimitMessage());
+  if (depCount > limits.manifestDeps) return toolError(overPlanLimitMessage());
   console.log(JSON.stringify({
     event: "manifest_audit",
     sha256: contentHash(input.content),
@@ -185,17 +190,19 @@ export async function auditManifest(access: Access, input: { filename: string; c
     dependencies: depCount
   }));
 
+  // The function limit is 20s. Lookups not started by this deadline are reported as not checked.
+  const deadline = nowMs() + AUDIT_LOOKUP_MS;
   const pinned = parsed.dependencies.filter((dep) => dep.version && !dep.range);
   const ranges = parsed.dependencies.filter((dep) => !dep.version || dep.range);
   const policy: LicensePolicy = { allow: input.licenseAllow, deny: input.licenseDeny };
   const pinnedFacts = pinned.length
-    ? await lookupPackages(pinned.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name, version: dep.version })))
+    ? await lookupPackages(pinned.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name, version: dep.version })), { deadline })
     : [];
   const findings = pinned.map((dep, index) => findingFrom(pinnedFacts[index], dep.version, policy));
   const extraFacts: PackageFact[] = [];
   // Batch range lookups so a ranged package.json does not run one lookup at a time.
   const rangeMeta = ranges.length
-    ? await lookupPackages(ranges.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name })))
+    ? await lookupPackages(ranges.map((dep) => ({ ecosystem: dep.ecosystem, name: dep.name })), { deadline })
     : [];
   extraFacts.push(...rangeMeta);
   const pairRequests: { ecosystem: Ecosystem; name: string; version: string }[] = [];
@@ -211,7 +218,7 @@ export async function auditManifest(access: Access, input: { filename: string; c
     pairRequests.push({ ecosystem: dep.ecosystem, name: dep.name, version: low });
     pairRequests.push({ ecosystem: dep.ecosystem, name: dep.name, version: high });
   });
-  const pairFacts = pairRequests.length ? await lookupPackages(pairRequests) : [];
+  const pairFacts = pairRequests.length ? await lookupPackages(pairRequests, { deadline }) : [];
   extraFacts.push(...pairFacts);
   for (const item of pairPlan) {
     const pair = [pairFacts[item.at], pairFacts[item.at + 1]];
@@ -270,7 +277,15 @@ export async function auditManifest(access: Access, input: { filename: string; c
   }, mergeSources(allFacts.map((fact) => fact.sources)), notes, Math.max(0, ...allFacts.map((fact) => fact.cacheAgeSeconds), 0), allFacts.some((fact) => fact.stale));
 }
 
-function commandsFor(ecosystem: Ecosystem, name: string, version: string): string[] {
+/** Versions come from registries. Anything outside this set is not placed in a shell command. */
+const COMMAND_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}$/;
+
+const AUDIT_LOOKUP_MS = 13_000;
+
+export function commandsFor(ecosystem: Ecosystem, name: string, version: string): string[] {
+  if (!COMMAND_VERSION.test(version) || !validPackageName(ecosystem, name)) {
+    return [`No command is shown because the version text has unexpected characters. Apply the upgrade with the ${ecosystem} toolchain after reviewing it.`];
+  }
   if (ecosystem === "npm") return [`npm install ${name}@${version}`];
   if (ecosystem === "pypi") return [`python -m pip install '${name}==${version}'`];
   if (ecosystem === "go") {

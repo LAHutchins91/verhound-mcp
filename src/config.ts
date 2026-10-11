@@ -98,6 +98,9 @@ export const REFRESH_REUSE_GRACE_MS = 10_000;
 /** A watch is due again after this age. The hourly job continues through every watch; it does not stop at a fixed count. */
 export const WATCH_STALE_MS = 20 * 60 * 60 * 1000;
 
+/** GitHub malware lookups per tool call. Larger inputs rely on OSV.dev MAL- records for the rest. */
+export const GITHUB_MALWARE_PER_CALL = 25;
+
 export const RECENT_RELEASE_MS = 72 * 60 * 60 * 1000;
 
 export function userAgent(): string {

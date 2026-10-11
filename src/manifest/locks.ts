@@ -43,13 +43,73 @@ export function parseCargoLock(content: string): ParseResult {
   return parsed;
 }
 
-function xmlBlocks(content: string, tag: string): string[] {
-  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, "gi");
-  const found: string[] = [];
-  let match: RegExpExecArray | null;
-  const text = content.replace(/<!--[\s\S]*?-->/g, "");
-  while ((match = re.exec(text))) found.push(match[1]);
+/** Removes XML comments in one pass. An unclosed comment drops the rest of the text. */
+function stripComments(text: string): string {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = text.indexOf("<!--", pos);
+    if (open === -1) return out + text.slice(pos);
+    out += text.slice(pos, open);
+    const close = text.indexOf("-->", open + 4);
+    if (close === -1) return out;
+    pos = close + 3;
+  }
+}
+
+interface XmlBlock {
+  start: number;
+  end: number;
+  attrs: string;
+  inner: string;
+}
+
+/**
+ * Finds <tag ...>inner</tag> and <tag .../> blocks with indexOf, so the cost stays linear.
+ * Lazy regexes re-scan to the end of the input for every unclosed tag, which is quadratic on hostile input.
+ * Scanning stops at the first unclosed tag.
+ */
+function findBlocks(text: string, tag: string): XmlBlock[] {
+  const lower = text.toLowerCase();
+  const name = tag.toLowerCase();
+  const closeTag = `</${name}>`;
+  const found: XmlBlock[] = [];
+  let pos = 0;
+  for (;;) {
+    const open = lower.indexOf(`<${name}`, pos);
+    if (open === -1) break;
+    const after = lower.charAt(open + name.length + 1);
+    if (after !== ">" && after !== "/" && !/\s/.test(after)) {
+      pos = open + 1;
+      continue;
+    }
+    const gt = lower.indexOf(">", open);
+    if (gt === -1) break;
+    if (lower.charAt(gt - 1) === "/") {
+      found.push({ start: open, end: gt + 1, attrs: text.slice(open + name.length + 1, gt - 1), inner: "" });
+      pos = gt + 1;
+      continue;
+    }
+    const close = lower.indexOf(closeTag, gt + 1);
+    if (close === -1) break;
+    found.push({ start: open, end: close + closeTag.length, attrs: text.slice(open + name.length + 1, gt), inner: text.slice(gt + 1, close) });
+    pos = close + closeTag.length;
+  }
   return found;
+}
+
+function removeBlocks(text: string, tag: string): string {
+  let out = "";
+  let pos = 0;
+  for (const block of findBlocks(text, tag)) {
+    out += text.slice(pos, block.start);
+    pos = block.end;
+  }
+  return out + text.slice(pos);
+}
+
+function xmlBlocks(content: string, tag: string): string[] {
+  return findBlocks(content, tag).map((block) => block.inner);
 }
 
 function xmlTag(block: string, tag: string): string {
@@ -59,7 +119,7 @@ function xmlTag(block: string, tag: string): string {
 
 export function parsePom(content: string): ParseResult {
   const parsed = result("pom.xml");
-  const withoutPlugins = content.replace(/<plugins>[\s\S]*?<\/plugins>/gi, "").replace(/<plugin>[\s\S]*?<\/plugin>/gi, "");
+  const withoutPlugins = removeBlocks(removeBlocks(stripComments(content), "plugins"), "plugin");
   const dependencySections = xmlBlocks(withoutPlugins, "dependencies");
   for (const section of dependencySections) {
     for (const block of xmlBlocks(section, "dependency")) {
@@ -88,12 +148,10 @@ export function parsePom(content: string): ParseResult {
 
 export function parseCsproj(content: string, includeDev: boolean): ParseResult {
   const parsed = result(".csproj");
-  const text = content.replace(/<!--[\s\S]*?-->/g, "");
-  const re = /<PackageReference\b([^>]*?)(?:\/>|>([\s\S]*?)<\/PackageReference>)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text))) {
-    const attrs = match[1] ?? "";
-    const inner = match[2] ?? "";
+  const text = stripComments(content);
+  for (const block of findBlocks(text, "PackageReference")) {
+    const attrs = block.attrs;
+    const inner = block.inner;
     const include = /Include\s*=\s*"([^"]+)"/i.exec(attrs)?.[1] ?? "";
     const version = /Version\s*=\s*"([^"]+)"/i.exec(attrs)?.[1] || xmlTag(inner, "Version");
     if (!include) continue;

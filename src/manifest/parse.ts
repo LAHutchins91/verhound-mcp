@@ -303,7 +303,23 @@ export function parseGoMod(content: string): ParseResult {
   return result;
 }
 
+/** Lockfiles repeat the same name and version under several ranges. Count and check each pair once. */
+function dedupe(parsed: ParseResult): ParseResult {
+  const seen = new Set<string>();
+  parsed.dependencies = parsed.dependencies.filter((dep) => {
+    const key = `${dep.ecosystem}|${dep.name}|${dep.version ?? ""}|${dep.range ? dep.spec : ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return parsed;
+}
+
 export function parseManifest(filename: string, content: string, includeDev = false): ParseResult {
+  return dedupe(parseManifestRaw(filename, content, includeDev));
+}
+
+function parseManifestRaw(filename: string, content: string, includeDev: boolean): ParseResult {
   const base = filename.split(/[/\\]/).pop()?.toLowerCase() ?? "";
   if (base === "pnpm-lock.yaml") return parsePnpmLock(content, includeDev);
   if (base === "yarn.lock") return parseYarnLock(content);

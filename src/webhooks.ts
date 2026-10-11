@@ -13,6 +13,9 @@ export function webhookKind(raw: string): WebhookKind | null {
   }
   if (url.protocol !== "https:") return null;
   if (url.username || url.password) return null;
+  // Only the default https port. A custom port would reach a different service on that host.
+  if (url.port) return null;
+  if (raw.length > 512) return null;
   if (url.hostname === "hooks.slack.com" && url.pathname.startsWith("/services/")) return "slack";
   if (url.hostname === "discord.com" && url.pathname.startsWith("/api/webhooks/")) return "discord";
   return null;
@@ -25,6 +28,10 @@ export function webhookHostLabel(raw: string | null | undefined): string | null 
   return null;
 }
 
+export function slackEscape(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /**
  * POST an alert text. Redirects are refused and not followed.
  * The URL is not written to logs.
@@ -32,7 +39,11 @@ export function webhookHostLabel(raw: string | null | undefined): string | null 
 export async function postWebhook(raw: string, text: string): Promise<"ok" | "rejected" | "failed"> {
   const kind = webhookKind(raw);
   if (!kind) return "rejected";
-  const payload = kind === "slack" ? { text } : { content: text.slice(0, 1900) };
+  // Package names such as @everyone/x must not ping a Discord server, and Slack control
+  // sequences like <!channel> must not be formed from alert text.
+  const payload = kind === "slack"
+    ? { text: slackEscape(text).slice(0, 3500) }
+    : { content: text.slice(0, 1900), allowed_mentions: { parse: [] } };
   let response: Response;
   try {
     response = await dispatchFetch(raw, {

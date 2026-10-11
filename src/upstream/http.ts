@@ -64,6 +64,8 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 let fetchOverride: FetchLike | null = null;
 const circuits = new Map<SourceName, number>();
 const alerted = new Set<string>();
+/** Identical requests that are already on the way share one upstream call. */
+const inflight = new Map<string, Promise<CachedJson>>();
 const h2 = new Agent({ allowH2: true, connect: { timeout: 8_000 } });
 
 class Semaphore {
@@ -101,6 +103,7 @@ export function resetUpstreamForTests(): void {
   fetchOverride = null;
   circuits.clear();
   alerted.clear();
+  inflight.clear();
 }
 
 /** Health keeps the original five keys. Other sources have circuits but are not added here. */
@@ -139,6 +142,20 @@ function retryAfterMs(value: string | null): number {
   if (Number.isFinite(seconds)) return Math.min(Math.max(seconds, 1), 3_600) * 1000;
   const date = Date.parse(value);
   if (Number.isFinite(date)) return Math.min(Math.max(date - nowMs(), 1_000), 3_600_000);
+  return 30_000;
+}
+
+/** GitHub answers a spent rate limit with 403 and x-ratelimit-remaining: 0. Treat it like 429. */
+function isRateLimited(response: Response): boolean {
+  if (response.status === 429) return true;
+  return response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
+}
+
+function rateLimitMs(response: Response): number {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) return retryAfterMs(retryAfter);
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) return Math.min(Math.max(reset * 1000 - nowMs(), 1_000), 3_600_000);
   return 30_000;
 }
 
@@ -220,7 +237,18 @@ async function recordRequest(source: SourceName, countNpm: boolean): Promise<voi
   }
 }
 
-export async function cachedJson(options: {
+export type CachedJsonOptions = Parameters<typeof cachedJsonOnce>[0];
+
+export function cachedJson(options: CachedJsonOptions): Promise<CachedJson> {
+  const key = cacheKey(options.source, options.method ?? "GET", options.url, options.body);
+  const running = inflight.get(key);
+  if (running) return running;
+  const started = cachedJsonOnce(options).finally(() => inflight.delete(key));
+  inflight.set(key, started);
+  return started;
+}
+
+async function cachedJsonOnce(options: {
   source: SourceName;
   method?: "GET" | "POST";
   url: string;
@@ -295,8 +323,8 @@ export async function cachedJson(options: {
       return fromCache(refreshed, false);
     }
 
-    if (response.status === 429) {
-      circuits.set(options.source, nowMs() + retryAfterMs(response.headers.get("retry-after")));
+    if (isRateLimited(response)) {
+      circuits.set(options.source, nowMs() + rateLimitMs(response));
       if (options.countNpm || options.source === "npm") await recordRequest(options.source, true);
       if (cached) {
         noteCacheHit();

@@ -66,7 +66,7 @@ Set these in the host. Do not commit secret values.
 | `REVIEWER_PASSWORD_HASH` | scrypt hash: parameters 16384, 8, 1, then the salt and hash |
 | `OPENAI_APPS_CHALLENGE` | Optional apps verification token |
 | `CRON_SECRET` | Required for the hourly watch job |
-| `GITHUB_TOKEN` | Optional. Raises the GitHub API limit for release-note checks and malware advisories. Omit it to use the unauthenticated API |
+| `GITHUB_TOKEN` | Recommended for production. A fine-grained token with no repository access raises the GitHub API limit from 60 to 5,000 requests an hour for release-note checks and malware advisories. Without it the limit is shared by the deployment IP, and those checks are skipped with a note once it runs out |
 | `MAIL_PROVIDER` | `resend` to send mail, otherwise no mail is sent |
 | `RESEND_API_KEY` | Used only when mail is enabled |
 | `ALERT_FROM` | From address for alert mail |

@@ -1,6 +1,6 @@
 import { advisoryFromOsv, type Advisory } from "./advisories.js";
-import { nowDate } from "./clock.js";
-import { type Ecosystem } from "./config.js";
+import { nowDate, nowMs } from "./clock.js";
+import { GITHUB_MALWARE_PER_CALL, type Ecosystem } from "./config.js";
 import { validPackageName } from "./names.js";
 import { SOURCE, type SourceCitation } from "./sources.js";
 import { cmpVersion, isPrerelease, versionsBehind } from "./semver.js";
@@ -115,15 +115,35 @@ function absorb(fact: PackageFact, response: CachedJson | undefined, source: Sou
   if (response.note) fact.notes.push(response.note);
 }
 
-export async function lookupPackages(requests: LookupRequest[]): Promise<PackageFact[]> {
+/** Workers that load package metadata. The per-source gates in http.ts still limit each upstream. */
+const METADATA_WORKERS = 24;
+
+export const TIME_LIMIT_NOTE = "Not checked: this call reached its time limit before this package was looked up. Split the manifest or check this package on its own.";
+
+export async function lookupPackages(requests: LookupRequest[], options: { deadline?: number } = {}): Promise<PackageFact[]> {
   const drafts: Draft[] = [];
-  await Promise.all(requests.map(async (request, index) => {
+  let next = 0;
+  const worker = async () => {
+    while (next < requests.length) {
+      const index = next;
+      next += 1;
+      await loadDraft(requests[index], index);
+    }
+  };
+  const loadDraft = async (request: LookupRequest, index: number) => {
+    // Packages not started before the deadline are reported as not checked, so a large
+    // manifest returns a partial answer instead of hitting the function time limit.
+    if (options.deadline !== undefined && nowMs() >= options.deadline) {
+      drafts[index] = { request, fact: blank(request, TIME_LIMIT_NOTE), queryVersion: undefined };
+      return;
+    }
     const fact = await loadMetadata(request);
     drafts[index] = { request, fact, queryVersion: fact.requested_version && fact.requested_version_found !== false ? fact.requested_version : fact.latest_stable };
     if (fact.requested_version && fact.requested_version_found === false && fact.exists) {
       drafts[index].queryVersion = fact.requested_version;
     }
-  }));
+  };
+  await Promise.all(Array.from({ length: Math.min(METADATA_WORKERS, requests.length) }, worker));
 
   const queries = drafts.flatMap((draft) => draft.fact.exists && draft.queryVersion
     ? [{ ecosystem: draft.request.ecosystem, name: draft.fact.name, version: draft.queryVersion }]
@@ -148,7 +168,21 @@ export async function lookupPackages(requests: LookupRequest[]): Promise<Package
     }
   }));
 
-  return Promise.all(drafts.map(async (draft, index) => {
+  // GitHub malware lookups are capped per call. Unauthenticated GitHub allows 60 requests an hour,
+  // and a large manifest must not turn into thousands of calls or run past the function time limit.
+  // OSV.dev MAL- records still cover every package.
+  const malwareNames = new Map<string, Promise<Awaited<ReturnType<typeof githubMalware>>>>();
+  const malwareFor = (ecosystem: Ecosystem, name: string) => {
+    const key = `${ecosystem}:${name.toLowerCase()}`;
+    const known = malwareNames.get(key);
+    if (known) return known;
+    if (malwareNames.size >= GITHUB_MALWARE_PER_CALL) return null;
+    const started = githubMalware(ecosystem, name);
+    malwareNames.set(key, started);
+    return started;
+  };
+
+  const facts = await Promise.all(drafts.map(async (draft, index) => {
     const fact = draft.fact;
     if (batch.notes.length) fact.notes.push(...batch.notes);
     fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, batch.age);
@@ -185,8 +219,12 @@ export async function lookupPackages(requests: LookupRequest[]): Promise<Package
         }
       }
     }
-    if (fact.exists !== null) {
-      const malware = await githubMalware(draft.request.ecosystem, fact.name);
+    const malwareLookup = fact.exists !== null ? malwareFor(draft.request.ecosystem, fact.name) : null;
+    if (fact.exists !== null && !malwareLookup) {
+      fact.notes.push(`The GitHub malware check covers the first ${GITHUB_MALWARE_PER_CALL} package names in a call; this package was not in it. OSV.dev malware records (MAL-) were still checked.`);
+    }
+    if (malwareLookup) {
+      const malware = await malwareLookup;
       fact.cacheAgeSeconds = Math.max(fact.cacheAgeSeconds, malware.age);
       fact.stale = fact.stale || malware.stale;
       if (malware.note && !malware.note.includes("404")) fact.notes.push(malware.note);
@@ -204,6 +242,7 @@ export async function lookupPackages(requests: LookupRequest[]): Promise<Package
     fact.notes = uniqueNotes(fact.notes);
     return fact;
   }));
+  return facts;
 }
 
 async function loadMetadata(request: LookupRequest): Promise<PackageFact> {
