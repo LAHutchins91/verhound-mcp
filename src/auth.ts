@@ -4,8 +4,9 @@ import { z } from "zod";
 import { PUBLIC_BRAND, SCOPE, publicBase, resourceUrl } from "./config.js";
 import { escapeHtml, page } from "./html.js";
 import { identityConfigured, sendEmailOtp, verifyEmailOtp } from "./identity.js";
-import { consumeAuthorizationCode, rememberRefresh, reuseRefresh } from "./oauth-state.js";
-import { configuredReviewerEmail, reviewerAccountId, reviewerCredentialsMatch, reviewerLoginConfigured } from "./reviewer.js";
+import { claimRefresh, consumeAuthorizationCode } from "./oauth-state.js";
+import { configuredReviewerEmail, isReviewerAccount, reviewerAccountId, reviewerCredentialsMatch, reviewerLoginConfigured } from "./reviewer.js";
+import { applyTrialMarker } from "./trial.js";
 import { getStore } from "./store.js";
 import { signToken, verifyToken, type TokenPayload } from "./tokens.js";
 
@@ -174,7 +175,7 @@ function consentPage(base: string, fields: Record<string, string>, clientName: s
     </section>` : "";
   const email = identityConfigured() ? `<section class="card" style="margin-top:14px">
       <h2>Email code</h2>
-      <p>Optional. A verified email is used for advisory alerts. Plan details are on the checkout page. This form does not collect a card.</p>
+      <p>Required for new accounts. A verified email unlocks the free plan and one Pro trial per person, and is where advisory alerts go. Plan details are on the checkout page. This form does not collect a card.</p>
       <form method="post" action="/authorize">${hidden}
         <label>Email <input name="email" type="email" maxlength="254"></label>
         <label>Code <input name="otp" inputmode="numeric" maxlength="12" autocomplete="one-time-code"></label>
@@ -188,6 +189,7 @@ function consentPage(base: string, fields: Record<string, string>, clientName: s
     ${banner}
     <section class="card">
       <p>Return address: ${escapeHtml(fields.redirect_uri)}</p>
+      <p>Continue works when this browser already signed in with a verified email. Otherwise use the email code below.</p>
       <p>Requested scope: ${escapeHtml(SCOPE)}</p>
       <form method="post" action="/authorize">${hidden}
         <div class="actions">
@@ -210,6 +212,7 @@ function redirectError(redirectUri: string, error: string, state: string): strin
 
 async function finishCode(res: Response, base: string, fields: Record<string, string>, sub: string, email: string | null, plan?: "pro"): Promise<void> {
   await getStore().ensureAccount(sub, email, plan);
+  if (email && plan !== "pro") await applyTrialMarker(sub, email);
   const secure = base.startsWith("https://");
   const code = signToken({
     typ: "code",
@@ -352,6 +355,9 @@ export function installOAuth(app: Express): void {
         return res.status(400).type("html").send(consentPage(base, fields, client.client_name, nextCsrf, "Email sign-in is not configured on this server."));
       }
       if (!otp) {
+        if (!allow(`otp:${req.ip}`, 5, 10 * 60 * 1000)) {
+          return res.status(429).type("html").send(consentPage(base, fields, client.client_name, nextCsrf, "Too many email codes were requested. Try again in a few minutes."));
+        }
         const sent = await sendEmailOtp(email);
         return res.status(sent.ok ? 200 : 400).type("html").send(consentPage(base, fields, client.client_name, nextCsrf, sent.ok ? "Check your email for a code, then submit it here." : (sent.error ?? "The email code could not be sent.")));
       }
@@ -360,7 +366,14 @@ export function installOAuth(app: Express): void {
       return finishCode(res, base, fields, verified.id, verified.email);
     }
     if (decision !== "approve") return res.redirect(redirectError(fields.redirect_uri, "access_denied", fields.state));
-    const sub = accountIdFromRequest(req) ?? crypto.randomUUID();
+    // Continue only reuses an account this browser already verified. New accounts need the email code.
+    const sub = accountIdFromRequest(req);
+    const account = sub ? await getStore().getAccount(sub) : null;
+    if (!sub || !account || !(account.email || account.plan === "pro" || isReviewerAccount(sub))) {
+      const nextCsrf = crypto.randomBytes(24).toString("base64url");
+      res.setHeader("Set-Cookie", cookieHeader(CSRF_COOKIE, nextCsrf, 30 * 60, secure));
+      return res.status(400).type("html").send(consentPage(base, fields, client.client_name, nextCsrf, "Verify your email with a code first. A verified email is required for the free plan and the Pro trial."));
+    }
     return finishCode(res, base, fields, sub, null);
   });
 
@@ -378,7 +391,7 @@ export function installOAuth(app: Express): void {
         const payload = verifyToken<TokenPayload & {
           sub?: unknown; aud?: unknown; client_hash?: unknown; redirect_uri?: unknown; code_challenge?: unknown; jti?: unknown;
         }>(code, "code");
-        if (typeof payload.jti !== "string" || !consumeAuthorizationCode(payload.jti, payload.exp)) {
+        if (typeof payload.jti !== "string" || !(await consumeAuthorizationCode(payload.jti, payload.exp))) {
           return oauthError(res, 400, "invalid_grant", "This authorization code was already used.");
         }
         if (payload.client_hash !== sha(clientId) || payload.redirect_uri !== redirectUri) {
@@ -400,14 +413,9 @@ export function installOAuth(app: Express): void {
         if (typeof payload.sub !== "string" || typeof payload.jti !== "string" || payload.aud !== audience) {
           return oauthError(res, 400, "invalid_grant", "The refresh token is not valid for this server.");
         }
-        const reuse = reuseRefresh(payload.jti);
-        if (!reuse.fresh) {
-          if (reuse.tokens) return res.set("Cache-Control", "no-store").json(reuse.tokens);
-          return oauthError(res, 400, "invalid_grant", "This refresh token was already used.");
-        }
-        const tokens = issueTokens(payload.sub, audience);
-        rememberRefresh(payload.jti, tokens);
-        res.set("Cache-Control", "no-store").json(tokens);
+        const use = await claimRefresh(payload.jti, payload.exp);
+        if (use === "reused") return oauthError(res, 400, "invalid_grant", "This refresh token was already used.");
+        res.set("Cache-Control", "no-store").json(issueTokens(payload.sub, audience));
         return;
       }
       return oauthError(res, 400, "unsupported_grant_type", "Use authorization_code or refresh_token.");

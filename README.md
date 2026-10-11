@@ -26,14 +26,16 @@ The assistant opens a browser page so you can approve the connection.
 Pro is $7.99/month or $79.99/year. The trial is 7 days, a card is required, and it includes 100 tool calls a day and 1 watched project. Pro includes 300 tool calls a day and up to 10 watched projects, plus daily advisory alerts.
 <!-- price-allowed:end -->
 
-Card checkout is shown on the site and is not collected until billing is connected on that deployment. There is a trial, then Pro.
+Free plan: an account with a verified email gets 15 one-off checks a day (`check_packages`, `verify_package_exists`, `runtime_eol`, and `audit_manifest` up to 20 KB), with up to 10 packages per call. `watch_manifest`, `list_alerts`, and `plan_upgrade` are part of Pro and the Pro trial. Every account needs a verified email, and each person gets one Pro trial. When a trial ends without Pro, the account moves to the free plan.
+
+Card checkout is shown on the site and is not collected until billing is connected on that deployment.
 
 ## Permissions, data, and limits
 
 - Tool calls read public package registries. `watch_manifest` stores the parsed dependency list (ecosystem, name, version), the filename, and the label. It does not store the raw file.
 - Logs keep the tool name, counts, timing, and a SHA-256 hash of pasted manifest text. They do not keep package contents or account identifiers in the timing line. Retention for those logs is 7 days.
 - Upstream calls are batched and cached. npm requests stop well under the registry's monthly ceiling.
-- Daily caps are enforced in US Eastern time. The published numbers are in Pricing. A trial ends. Pro raises limits.
+- Daily caps are enforced in US Eastern time. The published numbers are in Pricing. A trial ends and the account moves to the free plan. Pro raises limits.
 - `plan_upgrade` returns commands for you to run after reviewing. Verhound does not run them.
 - `verify_package_exists` means the name is published in the registry. It does not mean the package is maintained or the one you intended.
 - "No known advisories" means none were found in OSV.dev at the time shown.

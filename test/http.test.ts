@@ -11,6 +11,9 @@ import { resetStoreForTests } from "../src/store.js";
 import { resetUpstreamForTests } from "../src/upstream/http.js";
 import { resetAuthLimitsForTests } from "../src/auth.js";
 import { installFakeUpstream } from "./fake-upstream.js";
+import { setIdentityForTests } from "../src/identity.js";
+import { hashReviewerPassword } from "../src/reviewer.js";
+import { resetConfigLogForTests } from "../src/runtime-config.js";
 
 let server: Server;
 let base = "";
@@ -34,7 +37,26 @@ afterEach(() => {
   resetAuthLimitsForTests();
   delete process.env.CRON_SECRET;
   delete process.env.OPENAI_APPS_CHALLENGE;
+  delete process.env.VERCEL_ENV;
+  delete process.env.REVIEWER_EMAIL;
+  delete process.env.REVIEWER_PASSWORD_HASH;
+  setIdentityForTests(null);
+  resetConfigLogForTests();
 });
+
+const sentCodes = new Map<string, string>();
+function installFakeIdentity(): void {
+  setIdentityForTests({
+    async send(email) {
+      sentCodes.set(email, "123456");
+      return { ok: true };
+    },
+    async verify(email, token) {
+      if (sentCodes.get(email) !== token) return null;
+      return { id: crypto.createHash("sha256").update(email).digest("hex").replace(/^(.{8})(.{4}).(.{3}).(.{3})(.{12}).*$/, "$1-$2-4$3-a$4-$5"), email };
+    }
+  });
+}
 
 function cookiesOf(response: Response): string {
   const list = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [];
@@ -47,6 +69,7 @@ describe("http surface", () => {
     const body = await response.json() as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual([
       "billingConfigured",
+      "config",
       "mailConfigured",
       "name",
       "ok",
@@ -57,6 +80,7 @@ describe("http surface", () => {
     ]);
     expect(Object.keys(body.upstreams as object).sort()).toEqual(["depsdev", "eol", "npm", "osv", "pypi"]);
     expect(body.billingConfigured).toBe(false);
+    expect(body.config).toBe("memory_fallback");
     expect(JSON.stringify(body)).not.toContain("$");
   });
 
@@ -110,22 +134,39 @@ describe("http surface", () => {
     const html = await page.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? "";
     const cookie = cookiesOf(page);
-    const approved = await fetch(`${base}/authorize`, {
+    installFakeIdentity();
+    const formFields = {
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: "http://127.0.0.1/callback",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state: "xyz",
+      resource,
+      scope: "verhound"
+    };
+    const anonymous = await fetch(`${base}/authorize`, {
       method: "POST",
       redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie },
-      body: new URLSearchParams({
-        response_type: "code",
-        client_id: client.client_id,
-        redirect_uri: "http://127.0.0.1/callback",
-        code_challenge: challenge,
-        code_challenge_method: "S256",
-        state: "xyz",
-        resource,
-        scope: "verhound",
-        csrf,
-        decision: "approve"
-      })
+      body: new URLSearchParams({ ...formFields, csrf, decision: "approve" })
+    });
+    expect(anonymous.status).toBe(400);
+    expect(await anonymous.text()).toContain("Verify your email");
+    const csrf2 = cookiesOf(anonymous).match(/verhound_csrf=([^;]+)/)?.[1] ?? "";
+    const sendCode = await fetch(`${base}/authorize`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: `verhound_csrf=${csrf2}` },
+      body: new URLSearchParams({ ...formFields, csrf: decodeURIComponent(csrf2), decision: "email", email: "Tester@Example.com", otp: "" })
+    });
+    expect(sendCode.status).toBe(200);
+    const csrf3 = cookiesOf(sendCode).match(/verhound_csrf=([^;]+)/)?.[1] ?? "";
+    const approved = await fetch(`${base}/authorize`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: `verhound_csrf=${csrf3}` },
+      body: new URLSearchParams({ ...formFields, csrf: decodeURIComponent(csrf3), decision: "email", email: "tester@example.com", otp: "123456" })
     });
     expect(approved.status).toBe(302);
     const location = new URL(approved.headers.get("location") ?? "");
@@ -167,8 +208,9 @@ describe("http surface", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant_type: "refresh_token", refresh_token: token.refresh_token })
     });
+    expect(grace.status).toBe(200);
     const second = await grace.json() as { access_token: string };
-    expect(second.access_token).toBe(first.access_token);
+    expect(second.access_token).toBeTruthy();
     setClockForTests(Date.now() + 11_000);
     const expiredGrace = await fetch(`${base}/token`, {
       method: "POST",
@@ -248,6 +290,72 @@ describe("http surface", () => {
       expect(JSON.stringify(line)).not.toContain("express");
       expect(JSON.stringify(line)).not.toContain("4.17.1");
     }
+  });
+
+  it("lets a browser that already verified an email use Continue", async () => {
+    installFakeIdentity();
+    const reg = await (await fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["http://127.0.0.1/cb"] }) })).json() as { client_id: string };
+    const challenge = crypto.createHash("sha256").update("v".repeat(43)).digest("base64url");
+    const fields = { response_type: "code", client_id: reg.client_id, redirect_uri: "http://127.0.0.1/cb", code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${base}/mcp`, scope: "verhound" };
+    const start = async (cookie = "") => {
+      const page = await fetch(`${base}/authorize?${new URLSearchParams(fields)}`, { headers: { cookie } });
+      const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1] ?? "";
+      return { csrf, cookie: [cookie, cookiesOf(page)].filter(Boolean).join("; ") };
+    };
+    let flow = await start();
+    await fetch(`${base}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: flow.cookie }, body: new URLSearchParams({ ...fields, csrf: flow.csrf, decision: "email", email: "again@example.com", otp: "" }) });
+    flow = await start();
+    const verified = await fetch(`${base}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: flow.cookie }, body: new URLSearchParams({ ...fields, csrf: flow.csrf, decision: "email", email: "again@example.com", otp: "123456" }) });
+    expect(verified.status).toBe(302);
+    const account = cookiesOf(verified).split("; ").find((part) => part.startsWith("verhound_account=")) ?? "";
+    flow = await start(account);
+    const resumed = await fetch(`${base}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: flow.cookie }, body: new URLSearchParams({ ...fields, csrf: flow.csrf, decision: "approve" }) });
+    expect(resumed.status).toBe(302);
+    expect(resumed.headers.get("location")).toContain("code=");
+  });
+
+  it("keeps the reviewer sign-in working", async () => {
+    process.env.REVIEWER_EMAIL = "reviewer@example.com";
+    process.env.REVIEWER_PASSWORD_HASH = hashReviewerPassword("correct horse battery");
+    const reg = await (await fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["http://127.0.0.1/cb"] }) })).json() as { client_id: string };
+    const challenge = crypto.createHash("sha256").update("w".repeat(43)).digest("base64url");
+    const fields = { response_type: "code", client_id: reg.client_id, redirect_uri: "http://127.0.0.1/cb", code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${base}/mcp`, scope: "verhound" };
+    const page = await fetch(`${base}/authorize?${new URLSearchParams(fields)}`);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1] ?? "";
+    const posted = await fetch(`${base}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookiesOf(page) }, body: new URLSearchParams({ ...fields, csrf, decision: "reviewer", reviewer_email: "reviewer@example.com", reviewer_password: "correct horse battery" }) });
+    expect(posted.status).toBe(302);
+    expect(posted.headers.get("location")).toContain("code=");
+  });
+
+  it("fails closed in production when required env vars are missing", async () => {
+    process.env.VERCEL_ENV = "production";
+    const saved = { auth: process.env.AUTH_SECRET, url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY };
+    delete process.env.AUTH_SECRET;
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+    try {
+      for (const route of ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp", "/authorize"]) {
+        expect((await fetch(`${base}${route}`)).status, route).toBe(503);
+      }
+      expect((await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).status).toBe(503);
+      expect((await fetch(`${base}/token`, { method: "POST" })).status).toBe(503);
+      expect((await fetch(`${base}/register`, { method: "POST" })).status).toBe(503);
+      expect((await fetch(`${base}/api/cron/watch`)).status).toBe(503);
+      const health = await fetch(`${base}/health`);
+      expect(health.status).toBe(503);
+      const body = await health.json() as { ok: boolean; config: string };
+      expect(body).toMatchObject({ ok: false, config: "missing_required_env" });
+      expect((await fetch(`${base}/`)).status).toBe(200);
+    } finally {
+      console.error = original;
+      if (saved.auth) process.env.AUTH_SECRET = saved.auth;
+      if (saved.url) process.env.SUPABASE_URL = saved.url;
+      if (saved.key) process.env.SUPABASE_SERVICE_ROLE_KEY = saved.key;
+    }
+    const line = errors.find((entry) => entry.includes("config_missing")) ?? "";
+    expect(line).toContain("AUTH_SECRET");
+    expect(line).toContain("SUPABASE_SERVICE_ROLE_KEY");
   });
 
   it("answers the apps challenge", async () => {

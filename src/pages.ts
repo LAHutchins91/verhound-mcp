@@ -12,7 +12,13 @@ function priceCopy(): string {
   return `<!-- price-allowed:start -->
 <p>Pro is $7.99/month or $79.99/year.</p>
 <p>The trial is ${TRIAL_DAYS} days. A card is required. It includes ${LIMITS.trial.callsPerDay} tool calls a day and ${LIMITS.trial.watches} watched project. Pro includes ${LIMITS.pro.callsPerDay} tool calls a day and up to ${LIMITS.pro.watches} watched projects, plus daily advisory alerts.</p>
-<!-- price-allowed:end -->`;
+<!-- price-allowed:end -->
+${freeCopy()}`;
+}
+
+function freeCopy(): string {
+  const free = LIMITS.free;
+  return `<p>Free plan: an account with a verified email gets ${free.callsPerDay} one-off checks a day (package checks, existence checks, runtime end-of-life lookups, and manifest audits up to ${Math.round(free.manifestBytes / 1000)} KB), with up to ${free.packagesPerCall} packages per call. Watched projects, alerts, and upgrade plans are part of Pro and the Pro trial. One Pro trial per person. When a trial ends without Pro, the account moves to the free plan.</p>`;
 }
 
 function shell(req: Request, title: string, body: string): string {
@@ -42,7 +48,7 @@ export function installPages(app: Express): void {
         <article class="card"><h3>Known advisories</h3><p>Advisory IDs come from OSV.dev, with the first fixed version when OSV publishes one. An empty list means none were found at the time shown.</p></article>
         <article class="card"><h3>Existence</h3><p>A name that exists in the registry is only that: the name is published. It is not a statement about maintenance or intent.</p></article>
         <article class="card"><h3>Watched projects</h3><p>A watched project stores the parsed dependency list and filename. Verhound re-checks it daily and can email new advisories.</p></article>
-        <article class="card"><h3>Plans</h3><p>There is a trial, then Pro. There is no open-ended unpaid plan.</p></article>
+        <article class="card"><h3>Plans</h3><p>A small free plan for one-off checks, a ${TRIAL_DAYS}-day Pro trial, then Pro. Every account needs a verified email.</p></article>
       </section>
       <section class="section"><h2>Data sources</h2><p>${escapeHtml(DATA_SOURCES_TEXT)}</p></section>`;
     res.type("html").send(shell(req, PUBLIC_BRAND, body));
@@ -119,9 +125,13 @@ URL ${escapeHtml(endpoint)}</pre>
     const access = await accessFor(id);
     const csrf = crypto.randomBytes(18).toString("base64url");
     res.setHeader("Set-Cookie", `verhound_page=${encodeURIComponent(csrf)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1800`);
-    const trial = access.plan === "trial"
-      ? `Trial ${access.expired ? "ended" : "ends"} ${escapeHtml(access.trialEndsAt ?? trialEndsAt(new Date().toISOString()))}.`
-      : "Pro is active on this account.";
+    const trial = access.plan === "pro"
+      ? "Pro is active on this account."
+      : access.emailRequired
+        ? "This account has no verified email. Reconnect and sign in with the email code."
+        : access.plan === "trial"
+          ? `Pro trial ends ${escapeHtml(access.trialEndsAt ?? trialEndsAt(new Date().toISOString()))}.`
+          : `Free plan.${access.trialEndsAt ? ` The Pro trial ended ${escapeHtml(access.trialEndsAt)}.` : ""}`;
     const body = `<h1>Account</h1>
       <p>${trial}</p>
       <p>Email: ${escapeHtml(access.email ?? "none saved")}</p>

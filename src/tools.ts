@@ -116,7 +116,7 @@ export function createVerhoundServer(access: Access | null): McpServer {
 
   server.registerTool("plan_upgrade", {
     title: "Plan upgrade",
-    description: "Compare a pinned package version with a newer version and describe the version jump, advisories that the newer version addresses, advisories that remain, engine and peer dependency changes, and commands for you to run after reviewing. Verhound does not install or upgrade anything.",
+    description: "Pro and the Pro trial: compare a pinned package version with a newer version and describe the version jump, advisories that the newer version addresses, advisories that remain, engine and peer dependency changes, and commands for you to run after reviewing. Verhound does not install or upgrade anything.",
     inputSchema: {
       ecosystem,
       name: z.string().trim().min(1).max(214),

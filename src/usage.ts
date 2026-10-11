@@ -1,9 +1,9 @@
 import type { Access } from "./billing.js";
-import { capMessage, etDay, limitsFor, overPlanLimitMessage, trialEndedMessage } from "./config.js";
+import { capMessage, etDay, limitsFor, overPlanLimitMessage, verifyEmailMessage } from "./config.js";
 import { getStore } from "./store.js";
 
 export async function beginCall(access: Access, kind: "call" | "plan_upgrade", extras: { packages?: number; bytes?: number } = {}): Promise<string | null> {
-  if (access.expired) return trialEndedMessage();
+  if (access.emailRequired) return verifyEmailMessage();
   const limits = limitsFor(access.plan);
   const packages = extras.packages ?? 0;
   const bytes = extras.bytes ?? 0;

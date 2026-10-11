@@ -35,6 +35,15 @@ export type Ecosystem = (typeof ECOSYSTEMS)[number];
 export const TRIAL_DAYS = readTrialDays(7);
 
 export const LIMITS = {
+  /** Verified-email accounts without an active trial or Pro: small one-off checks only. */
+  free: {
+    callsPerDay: 15,
+    packagesPerCall: 10,
+    manifestBytes: 20_000,
+    manifestDeps: 100,
+    planUpgradePerDay: 0,
+    watches: 0
+  },
   trial: {
     callsPerDay: 100,
     packagesPerCall: 25,
@@ -53,7 +62,10 @@ export const LIMITS = {
   }
 } as const;
 
-export type Plan = "trial" | "pro";
+export type Plan = "free" | "trial" | "pro";
+
+/** Tools that need the Pro trial or Pro. */
+export const PRO_ONLY_TOOLS = ["watch_manifest", "list_alerts", "plan_upgrade"] as const;
 
 function readTrialDays(fallback: number): number {
   const raw = process.env.TRIAL_DAYS?.trim();
@@ -152,8 +164,13 @@ export function proUpsell(): string {
   return "This feature is part of Pro. Pro adds watched manifests, daily advisory alerts, and higher limits.";
 }
 
-export function trialEndedMessage(): string {
-  return "This trial has ended. Pro keeps access after the trial. Upgrades open soon.";
+export function proOnlyMessage(): string {
+  const base = (process.env.APP_BASE_URL?.trim() || HOST).replace(/\/$/, "");
+  return `This tool is part of Pro and the ${TRIAL_DAYS}-day Pro trial. Start the trial or upgrade at ${base}/checkout. The free plan covers one-off package checks, existence checks, runtime end-of-life lookups, and small manifest audits.`;
+}
+
+export function verifyEmailMessage(): string {
+  return "Verify an email address to use Verhound. Reconnect your assistant and sign in with the email code.";
 }
 
 export function overPlanLimitMessage(): string {

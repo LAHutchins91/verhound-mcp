@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { Access } from "./billing.js";
 import { nowDate, nowMs } from "./clock.js";
-import { limitsFor, overPlanLimitMessage, proUpsell, type Ecosystem } from "./config.js";
+import { limitsFor, overPlanLimitMessage, proOnlyMessage, proUpsell, verifyEmailMessage, type Ecosystem } from "./config.js";
 import { envelope, toolError, toolResult } from "./envelope.js";
 import { parseManifest, type ParsedDep } from "./manifest/parse.js";
 import { lookupPackages, type PackageFact } from "./lookup.js";
@@ -47,6 +47,13 @@ function publicFact(fact: PackageFact) {
 
 function finish(data: unknown, sources: SourceCitation[], notes: string[], age: number, stale: boolean): ToolPayload {
   return toolResult(envelope(data, sources, notes, age, stale));
+}
+
+/** Free accounts get a clear Pro-only message, and the call is not counted. */
+function proOnly(access: Access): ToolPayload | null {
+  if (access.emailRequired) return toolError(verifyEmailMessage());
+  if (access.plan === "free") return toolError(proOnlyMessage());
+  return null;
 }
 
 async function gate(access: Access, kind: "call" | "plan_upgrade", extras: { packages?: number; bytes?: number } = {}): Promise<string | null> {
@@ -220,6 +227,8 @@ function commandsFor(ecosystem: Ecosystem, name: string, version: string): strin
 }
 
 export async function planUpgrade(access: Access, input: { ecosystem: Ecosystem; name: string; fromVersion: string; toVersion?: string; projectRuntime?: { node?: string; python?: string } }): Promise<ToolPayload> {
+  const denied = proOnly(access);
+  if (denied) return denied;
   const blocked = await gate(access, "plan_upgrade", { packages: 1 });
   if (blocked) return toolError(blocked);
   const [fromFact] = await lookupPackages([{ ecosystem: input.ecosystem, name: input.name, version: input.fromVersion }]);
@@ -305,6 +314,8 @@ async function baseline(deps: DepRecord[]): Promise<{ packagesWithAdvisories: nu
 }
 
 export async function watchManifest(access: Access, input: { label: string; filename: string; content: string; minSeverity?: string; alertEmail?: "account" }): Promise<ToolPayload> {
+  const denied = proOnly(access);
+  if (denied) return denied;
   const limits = limitsFor(access.plan);
   const bytes = Buffer.byteLength(input.content);
   const blocked = await gate(access, "call", { bytes });
@@ -368,6 +379,8 @@ export async function watchManifest(access: Access, input: { label: string; file
 }
 
 export async function listAlerts(access: Access, input: { label?: string; since?: string; limit: number }): Promise<ToolPayload> {
+  const denied = proOnly(access);
+  if (denied) return denied;
   const blocked = await gate(access, "call");
   if (blocked) return toolError(blocked);
   const store = getStore();

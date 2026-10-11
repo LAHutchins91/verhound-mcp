@@ -11,7 +11,10 @@ export function isBillingConfigured(): boolean {
 export interface Access {
   accountId: string;
   plan: Plan;
+  /** True when a trial existed and has ended. The account then uses the free plan. */
   expired: boolean;
+  /** True when the account has no verified email. Tool calls are refused until it has one. */
+  emailRequired: boolean;
   trialEndsAt: string | null;
   email: string | null;
 }
@@ -29,6 +32,7 @@ export async function accessFor(accountId: string): Promise<Access> {
       accountId,
       plan: "pro",
       expired: false,
+      emailRequired: false,
       trialEndsAt: null,
       email: account?.email ?? configuredReviewerEmail()
     };
@@ -36,14 +40,19 @@ export async function accessFor(accountId: string): Promise<Access> {
   const account = await getStore().getAccount(accountId);
   const email = account?.email ?? null;
   if (account?.plan === "pro") {
-    return { accountId, plan: "pro", expired: false, trialEndsAt: null, email };
+    return { accountId, plan: "pro", expired: false, emailRequired: false, trialEndsAt: null, email };
+  }
+  if (!email) {
+    return { accountId, plan: "free", expired: false, emailRequired: true, trialEndsAt: null, email: null };
   }
   const started = account?.trial_started_at ?? account?.created_at ?? new Date(nowMs()).toISOString();
   const ends = trialEndsAt(started);
+  const expired = nowMs() >= Date.parse(ends);
   return {
     accountId,
-    plan: "trial",
-    expired: nowMs() >= Date.parse(ends),
+    plan: expired ? "free" : "trial",
+    expired,
+    emailRequired: false,
     trialEndsAt: ends,
     email
   };
